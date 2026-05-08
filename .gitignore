@@ -219,5 +219,6 @@ __marimo__/
 
 # Project-specific
 eval_results/
+output/
 *.pt
 checkpoints/

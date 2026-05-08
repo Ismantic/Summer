@@ -31,6 +31,18 @@ def load_tokenizer(model_path):
         return AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
 
+def _copy_tokenizer_artifacts(src_dir, dst_dir):
+    """Copy piece tokenizer + dict + mapping files alongside a saved checkpoint
+    so it's directly loadable by PieceTokenizerWrapper / eval_with_piece.py."""
+    import shutil
+    artifacts = ["piece.model", "dict.txt", "token_mapping.json",
+                 "tokenizer_config.json", "special_tokens_map.json"]
+    for name in artifacts:
+        src = os.path.join(src_dir, name)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(dst_dir, name))
+
+
 class SFTDataset(Dataset):
     """Chat-format dataset for translation SFT."""
     def __init__(self, data_file, tokenizer, max_seq_length=2048):
@@ -181,7 +193,20 @@ def build_optimizer(model, muon_lr, adam_lr, muon_momentum, weight_decay):
 
 
 def train(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # DDP setup (no-op when launched as single process)
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    is_distributed = world_size > 1
+    is_main = (local_rank == 0)
+    if is_distributed:
+        import torch.distributed as dist
+        dist.init_process_group("nccl")
+        torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+
+    def log(*a, **kw):
+        if is_main:
+            print(*a, **kw)
 
     # Load tokenizer & model
     tokenizer = load_tokenizer(args.model_path)
@@ -199,8 +224,8 @@ def train(args):
                 param.requires_grad = False
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
-        print(f"Frozen transformer: training {trainable:,} / {total:,} params "
-              f"({trainable/total*100:.1f}%)")
+        log(f"Frozen transformer: training {trainable:,} / {total:,} params "
+            f"({trainable/total*100:.1f}%)")
 
     # Freeze specific embedding rows (one-to-one mapped tokens)
     if args.freeze_mapped_embeds:
@@ -209,12 +234,22 @@ def train(args):
         frozen_mask = torch.zeros(model.config.vocab_size, 1, device=device, dtype=torch.bfloat16)
         frozen_mask[frozen_ids] = 1.0
         trainable_count = model.config.vocab_size - len(frozen_ids)
-        print(f"Freezing {len(frozen_ids)} / {model.config.vocab_size} embedding rows, "
-              f"training {trainable_count} rows ({trainable_count/model.config.vocab_size*100:.1f}%)")
+        log(f"Freezing {len(frozen_ids)} / {model.config.vocab_size} embedding rows, "
+            f"training {trainable_count} rows ({trainable_count/model.config.vocab_size*100:.1f}%)")
 
         def _zero_frozen_grads(grad):
             return grad * (1.0 - frozen_mask)
         model.model.embed_tokens.weight.register_hook(_zero_frozen_grads)
+
+    # Wrap with DDP after freeze logic + grad-hook registration (so the hook
+    # binds to the underlying parameter, not the DDP-replicated one).
+    raw_model = model
+    if is_distributed:
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        # find_unused_parameters=True because freeze_transformer leaves
+        # transformer params with requires_grad=False; DDP's autograd-graph
+        # check needs this hint when not all params get grads each step.
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=args.freeze_transformer)
 
     # Dataset
     pad_token_id = tokenizer.pad_token_id
@@ -226,13 +261,22 @@ def train(args):
         dataset = SFTDataset(args.train_data, tokenizer, args.max_seq_length)
 
     is_iterable = isinstance(dataset, torch.utils.data.IterableDataset)
+    sampler = None
+    if is_distributed and not is_iterable:
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset, shuffle=True, drop_last=True
+        )
+    elif is_distributed and is_iterable:
+        raise NotImplementedError("DDP + IterableDataset not supported; pretokenize first")
     dataloader = DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=not is_iterable, num_workers=0,
+        dataset, batch_size=args.batch_size,
+        shuffle=(sampler is None and not is_iterable),
+        sampler=sampler, num_workers=0,
         collate_fn=lambda batch: collate_fn(batch, pad_token_id),
     )
 
-    # Optimizer
-    optimizer = build_optimizer(model, args.muon_lr, args.adam_lr, args.muon_momentum, args.weight_decay)
+    # Optimizer (build on raw model so param names don't have DDP "module." prefix)
+    optimizer = build_optimizer(raw_model, args.muon_lr, args.adam_lr, args.muon_momentum, args.weight_decay)
 
     # LR scheduler
     def lr_lambda(step):
@@ -259,7 +303,11 @@ def train(args):
         print(f"\nCtrl+C received at step {step}, saving checkpoint...")
     signal.signal(signal.SIGINT, _sigint_handler)
 
+    epoch = 0
     while step < args.max_steps and not interrupted:
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+        epoch += 1
         for batch in dataloader:
             if step >= args.max_steps or interrupted:
                 break
@@ -287,23 +335,33 @@ def train(args):
                     elapsed = time.time() - t0
                     lrs = [f"{g['lr']:.6f}" for g in optimizer.param_groups]
                     real_loss = loss.item() * args.gradient_accumulation_steps
-                    print(f"step {step}/{args.max_steps} | loss {real_loss:.4f} | "
-                          f"lr [{', '.join(lrs)}] | {elapsed:.1f}s")
+                    log(f"step {step}/{args.max_steps} | loss {real_loss:.4f} | "
+                        f"lr [{', '.join(lrs)}] | {elapsed:.1f}s")
 
-                if args.save_steps > 0 and step % args.save_steps == 0:
+                if args.save_steps > 0 and step % args.save_steps == 0 and is_main:
                     save_path = os.path.join(args.output_dir, f"checkpoint-{step}")
                     os.makedirs(save_path, exist_ok=True)
-                    model.save_pretrained(save_path)
+                    # Restore use_cache for inference; we set it False during
+                    # training but want generation to use KV cache.
+                    raw_model.config.use_cache = True
+                    raw_model.save_pretrained(save_path)
+                    raw_model.config.use_cache = False
+                    _copy_tokenizer_artifacts(args.model_path, save_path)
                     print(f"Saved checkpoint to {save_path}")
 
-    # Save final model
-    if args.output_dir:
+    # Save final model (only main rank)
+    if args.output_dir and is_main:
         os.makedirs(args.output_dir, exist_ok=True)
-        model.save_pretrained(args.output_dir)
+        raw_model.config.use_cache = True
+        raw_model.save_pretrained(args.output_dir)
+        _copy_tokenizer_artifacts(args.model_path, args.output_dir)
         print(f"Saved final model to {args.output_dir}")
 
     elapsed = time.time() - t0
-    print(f"Training complete: {step} steps in {elapsed:.1f}s ({step/elapsed:.2f} steps/s)")
+    log(f"Training complete: {step} steps in {elapsed:.1f}s ({step/elapsed:.2f} steps/s)")
+    if is_distributed:
+        import torch.distributed as dist
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

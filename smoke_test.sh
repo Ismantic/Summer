@@ -4,24 +4,27 @@
 set -u
 
 PYTHON=/home/tfbao/.venv/bin/python
-QWEN_BASE=/home/tfbao/new/Qwen3-0.6B-Base
-QWEN_NEW=/home/tfbao/new/Qwen3-0.6B-Base-new-tok
-OUT=/home/tfbao/Shiyu/Summer/eval_results/smoke
-LIMIT=20
+QWEN_BASE=${QWEN_BASE:-/home/tfbao/new/Qwen3-0.6B-Base}
+QWEN_NEW=${QWEN_NEW:-/home/tfbao/new/Qwen3-0.6B-Base-new-tok}
+OUT=${OUT:-/home/tfbao/Shiyu/Summer/eval_results/smoke}
+LIMIT=${LIMIT:-20}
 
 mkdir -p "$OUT/base" "$OUT/new-tok"
 
 TASKS=(
+    "lambada_openai:0"
     "piqa:5"
     "arc_challenge:25"
     "hellaswag:10"
     "mmlu_abstract_algebra:5"
-    "cmmlu_chinese_history:5"
-    "agieval_lsat_lr:0"
-    "bbh_cot_fewshot_navigate:0"
-    "humaneval:0"
     "gsm8k:5"
 )
+# Dropped from ReTok Table 2:
+#   cmmlu  — datasets 4.x removed .py-script-style loading
+#   humaneval — needs HF_ALLOW_CODE_EVAL=1 + sandbox; noisy at limit=20
+#   agieval, bbh — not informative enough at smoke scale, slow
+# Kept 5: PIQA / ARC-C / HellaSwag / MMLU / GSM8K — covers reasoning, commonsense,
+# knowledge, and math (generation), enough signal for smoke-level diffs.
 
 run_base() {
     local task=$1 shots=$2 out=$3

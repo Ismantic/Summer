@@ -17,7 +17,13 @@ def main(args):
     print(f"Vocab: {tok.vocab_size()}, seq_len={args.seq_length}")
 
     files = [f.strip() for f in args.input.split(",")]
-    handles = [open(f, 'r', encoding='utf8') for f in files]
+    handles = [open(f, 'r', encoding='utf8', errors='replace') for f in files]
+    if args.skip_lines > 0:
+        for fh in handles:
+            for _ in range(args.skip_lines):
+                if not fh.readline():
+                    break
+        print(f"Skipped first {args.skip_lines} lines of each file")
     exhausted = [False] * len(handles)
 
     buf = []
@@ -37,7 +43,9 @@ def main(args):
             if not line:
                 continue
 
-            buf.append(bos)
+            # GPT-style packing: single </s> separator between docs (matching
+            # Qwen3 base format where bos_id == eos_id == <|endoftext|>).
+            # No leading <s> — adjacent docs become "...text1</s>text2</s>..."
             buf.extend(tok.encode_as_ids(line))
             buf.append(eos)
             lines_read += 1
@@ -79,5 +87,7 @@ if __name__ == "__main__":
     parser.add_argument("--seq_length", type=int, default=384)
     parser.add_argument("--max_chunks", type=int, default=None)
     parser.add_argument("--cn_dict", type=str, default=None)
+    parser.add_argument("--skip_lines", type=int, default=0,
+                        help="Skip first N lines of each input file (for held-out valid set)")
     args = parser.parse_args()
     main(args)
