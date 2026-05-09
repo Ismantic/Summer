@@ -105,11 +105,16 @@ def left_pad(token_lists, pad_id, device):
 
 
 def trim_continuation(text: str, src_label: str) -> str:
-    """Stop at the next 'English:' / 'Chinese:' header or first blank line."""
-    for stop in (f"\n{src_label}:", "\n\n", "\nEnglish:", "\nChinese:"):
-        cut = text.find(stop)
-        if cut != -1:
-            text = text[:cut]
+    """Stop at the next 'English:' / 'Chinese:' header (newline OR space-separated)
+    or first blank line. Models trained on diverse data sometimes emit space-only
+    separators instead of newlines, so we match both."""
+    stops = ("\n\n", "\n English:", "\n Chinese:",
+             "\nEnglish:", "\nChinese:", "  English:", "  Chinese:",
+             f"  {src_label}:", f"\n{src_label}:")
+    cuts = [text.find(s) for s in stops]
+    cuts = [c for c in cuts if c != -1]
+    if cuts:
+        text = text[:min(cuts)]
     return text.strip()
 
 

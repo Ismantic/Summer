@@ -7,7 +7,7 @@ PYTHON=/home/tfbao/.venv/bin/python
 QWEN_BASE=${QWEN_BASE:-/home/tfbao/new/Qwen3-0.6B-Base}
 QWEN_NEW=${QWEN_NEW:-/home/tfbao/new/Qwen3-0.6B-Base-new-tok}
 OUT=${OUT:-/home/tfbao/Shiyu/Summer/eval_results/smoke}
-LIMIT=${LIMIT:-20}
+LIMIT=${LIMIT:-200}
 
 mkdir -p "$OUT/base" "$OUT/new-tok"
 

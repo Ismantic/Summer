@@ -64,7 +64,18 @@ class PieceTokenizerWrapper:
             special = {self.bos_token_id, self.eos_token_id, self.pad_token_id,
                        self.user_token_id, self.assistant_token_id, self.system_token_id}
             ids = [i for i in ids if i not in special]
-        return self._tok.decode(ids)
+        try:
+            return self._tok.decode(ids)
+        except UnicodeDecodeError:
+            # Model emitted byte-fallback piece(s) that don't form valid UTF-8.
+            # Per-piece fallback: keep ids that decode cleanly, drop the rest.
+            parts = []
+            for i in ids:
+                try:
+                    parts.append(self._tok.id_to_piece(i))
+                except UnicodeDecodeError:
+                    continue
+            return "".join(parts).replace("▁", " ")
 
     def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=False, **kwargs):
         """Build chat-formatted token sequence from messages."""

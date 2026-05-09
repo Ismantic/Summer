@@ -42,6 +42,10 @@ def main(args):
             line = line.strip()
             if not line:
                 continue
+            if args.max_line_chars and len(line) > args.max_line_chars:
+                # huge lines (e.g. 1.4MB Wikipedia article) can segfault the
+                # C++ tokenizer; truncate to be safe
+                line = line[:args.max_line_chars]
 
             # GPT-style packing: single </s> separator between docs (matching
             # Qwen3 base format where bos_id == eos_id == <|endoftext|>).
@@ -89,5 +93,8 @@ if __name__ == "__main__":
     parser.add_argument("--cn_dict", type=str, default=None)
     parser.add_argument("--skip_lines", type=int, default=0,
                         help="Skip first N lines of each input file (for held-out valid set)")
+    parser.add_argument("--max_line_chars", type=int, default=100000,
+                        help="Truncate any single line longer than this many chars "
+                             "(prevents C++ tokenizer segfault on giant Wiki articles)")
     args = parser.parse_args()
     main(args)
