@@ -60,6 +60,27 @@ priors.
 - Total ~85 min per experiment
 - Skip MMLU full for clearly-failed runs (BLEU dropped or loss diverged); only run for promising candidates
 
+## Default recipe (use unless empirically proven worse)
+
+For any Phase 2 or from-scratch transformer training where MLPs are unfrozen
+and trained ≥500 steps, **use Aurora as the default optimizer**, not vanilla
+Muon. Rationale:
+
+- 6% compute overhead is dominated by Aurora's protection against neuron
+  death in tall matrices (Aurora paper, Tilde Research, 2026)
+- Short-run ablations (v8_s2_aurora vs v8_s2_muon5e5 at 500 steps) showed
+  parity, not Muon advantage — and Aurora's advantage accumulates with step
+  count, so this is asymmetric risk-return
+- Qwen3-0.6B-Base has MLP expansion 5.83× (in Aurora's sweet spot per
+  Figure: monotonic gain with expansion factor)
+- Caveats: MoE architectures benefit less (smaller per-expert m/n); for
+  square-only matrix groups Aurora reduces exactly to Muon, so neutral
+
+Concretely: `--use_aurora` should be the default in all new run scripts
+until/unless an ablation in the same regime shows Muon strictly better.
+Moonshot's per-param LR scaling (`--moonshot_scaling`) is orthogonal —
+evaluate independently and stack if it adds value.
+
 ## Objective
 
 Primary score (for keep/discard decisions):

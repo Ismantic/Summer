@@ -225,6 +225,21 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
         return loss
 
 
+def moonshot_lr_scale(param_shape):
+    """Moonshot's per-parameter LR adjustment (Liu et al., 2025).
+
+    Adjusts LR by 0.2 * sqrt(max(A, B)) so that update RMS stays
+    consistent across heterogeneous matrix shapes. Without this,
+    smaller matrices over-train and larger matrices under-train at
+    the same nominal LR. Critical for large-scale Muon training per
+    the Moonlight paper.
+
+    Source: https://github.com/MoonshotAI/Moonlight
+    """
+    A, B = param_shape[:2]
+    return 0.2 * (max(A, B) ** 0.5)
+
+
 class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
     """
     Non-distributed variant of MuonWithAuxAdam.
@@ -232,9 +247,13 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
     Set update_fn=aurora_update (from aurora.py) instead of the default
     muon_update to switch the Muon groups' update rule. The signature is
     identical: (grad, momentum, beta) -> update tensor.
+
+    Set moonshot_scaling=True to apply Moonshot's per-param LR adjustment
+    (0.2 * sqrt(max(A, B))) on top of whatever update rule is in use.
     """
-    def __init__(self, param_groups, update_fn=None):
+    def __init__(self, param_groups, update_fn=None, moonshot_scaling=False):
         self._update_fn = update_fn or muon_update
+        self._moonshot_scaling = moonshot_scaling
         for group in param_groups:
             assert "use_muon" in group
             if group["use_muon"]:
@@ -270,8 +289,9 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
                     update = self._update_fn(p.grad, state["momentum_buffer"], beta=group["momentum"])
-                    p.mul_(1 - group["lr"] * group["weight_decay"])
-                    p.add_(update.reshape(p.shape), alpha=-group["lr"])
+                    eff_lr = group["lr"] * moonshot_lr_scale(p.shape) if self._moonshot_scaling else group["lr"]
+                    p.mul_(1 - eff_lr * group["weight_decay"])
+                    p.add_(update.reshape(p.shape), alpha=-eff_lr)
             else:
                 for p in group["params"]:
                     if p.grad is None:

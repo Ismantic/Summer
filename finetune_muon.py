@@ -167,7 +167,7 @@ def collate_fn(batch, pad_token_id):
     return dict(input_ids=input_ids, labels=labels, attention_mask=attention_mask)
 
 
-def build_optimizer(model, muon_lr, adam_lr, muon_momentum, weight_decay, use_aurora=False):
+def build_optimizer(model, muon_lr, adam_lr, muon_momentum, weight_decay, use_aurora=False, moonshot_scaling=False):
     muon_params = []
     adam_params = []
     for name, param in model.named_parameters():
@@ -181,7 +181,9 @@ def build_optimizer(model, muon_lr, adam_lr, muon_momentum, weight_decay, use_au
     muon_count = sum(p.numel() for p in muon_params)
     adam_count = sum(p.numel() for p in adam_params)
     rule = "Aurora" if use_aurora else "Muon"
-    print(f"{rule} params: {muon_count:,} | Adam params: {adam_count:,}")
+    if moonshot_scaling:
+        rule = f"{rule}+MoonshotLR"
+    print(f"{rule} params: {muon_count:,} | Adam params: {adam_count:,}  (wd={weight_decay})")
 
     if muon_params:
         param_groups = [
@@ -189,7 +191,7 @@ def build_optimizer(model, muon_lr, adam_lr, muon_momentum, weight_decay, use_au
             dict(params=adam_params, lr=adam_lr, betas=(0.9, 0.95), eps=1e-10, weight_decay=weight_decay, use_muon=False),
         ]
         update_fn = aurora_update if use_aurora else None
-        return SingleDeviceMuonWithAuxAdam(param_groups, update_fn=update_fn)
+        return SingleDeviceMuonWithAuxAdam(param_groups, update_fn=update_fn, moonshot_scaling=moonshot_scaling)
     else:
         # No Muon params (e.g. freeze_transformer), use plain Adam
         return torch.optim.AdamW(adam_params, lr=adam_lr, betas=(0.9, 0.95), eps=1e-10, weight_decay=weight_decay)
@@ -201,8 +203,8 @@ def train(args):
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     is_distributed = world_size > 1
     is_main = (local_rank == 0)
+    import torch.distributed as dist
     if is_distributed:
-        import torch.distributed as dist
         dist.init_process_group("nccl")
         torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
@@ -280,7 +282,7 @@ def train(args):
 
     # Optimizer (build on raw model so param names don't have DDP "module." prefix)
     optimizer = build_optimizer(raw_model, args.muon_lr, args.adam_lr, args.muon_momentum, args.weight_decay,
-                                use_aurora=args.use_aurora)
+                                use_aurora=args.use_aurora, moonshot_scaling=args.moonshot_scaling)
 
     # LR scheduler
     def lr_lambda(step):
@@ -297,6 +299,37 @@ def train(args):
     micro_step = 0
     t0 = time.time()
     interrupted = False
+
+    def _move_optimizer_state(target):
+        """Move all optimizer state tensors to target device."""
+        for st in optimizer.state.values():
+            for k, v in st.items():
+                if torch.is_tensor(v):
+                    st[k] = v.to(target, non_blocking=False)
+
+    def _inline_eval(current_step):
+        """Offload model+optimizer to CPU, run eval subprocess, move back."""
+        if not args.inline_eval_cmd:
+            return
+        # All ranks offload
+        raw_model.cpu()
+        _move_optimizer_state("cpu")
+        torch.cuda.empty_cache()
+        if is_distributed:
+            dist.barrier()
+        # Only main rank runs eval command
+        if is_main:
+            cmd = args.inline_eval_cmd.replace("{step}", str(current_step))
+            log(f"[inline_eval] running: {cmd}")
+            t_ev = time.time()
+            os.system(cmd)
+            log(f"[inline_eval] done in {time.time()-t_ev:.0f}s")
+        if is_distributed:
+            dist.barrier()
+        # All ranks move back
+        raw_model.to(device)
+        _move_optimizer_state(device)
+        torch.cuda.empty_cache()
 
     import signal
     def _sigint_handler(sig, frame):
@@ -342,16 +375,21 @@ def train(args):
                     log(f"step {step}/{args.max_steps} | loss {real_loss:.4f} | "
                         f"lr [{', '.join(lrs)}] | {elapsed:.1f}s")
 
-                if args.save_steps > 0 and step % args.save_steps == 0 and is_main:
-                    save_path = os.path.join(args.output_dir, f"checkpoint-{step}")
-                    os.makedirs(save_path, exist_ok=True)
-                    # Restore use_cache for inference; we set it False during
-                    # training but want generation to use KV cache.
-                    raw_model.config.use_cache = True
-                    raw_model.save_pretrained(save_path)
-                    raw_model.config.use_cache = False
-                    _copy_tokenizer_artifacts(args.model_path, save_path)
-                    print(f"Saved checkpoint to {save_path}")
+                if args.save_steps > 0 and step % args.save_steps == 0:
+                    if is_main:
+                        save_path = os.path.join(args.output_dir, f"checkpoint-{step}")
+                        os.makedirs(save_path, exist_ok=True)
+                        # Restore use_cache for inference; we set it False during
+                        # training but want generation to use KV cache.
+                        raw_model.config.use_cache = True
+                        raw_model.save_pretrained(save_path)
+                        raw_model.config.use_cache = False
+                        _copy_tokenizer_artifacts(args.model_path, save_path)
+                        print(f"Saved checkpoint to {save_path}")
+                    if is_distributed:
+                        dist.barrier()
+                    # Inline eval (CPU-offload pattern) if requested
+                    _inline_eval(step)
 
     # Save final model (only main rank)
     if args.output_dir and is_main:
@@ -388,6 +426,18 @@ if __name__ == "__main__":
     parser.add_argument("--muon_momentum", type=float, default=0.95)
     parser.add_argument("--use_aurora", action="store_true",
                         help="Use Aurora update rule (leverage-uniform polar) instead of standard Muon")
+    parser.add_argument("--moonshot_scaling", action="store_true",
+                        help="Apply Moonshot's per-param LR scaling (lr *= 0.2 * sqrt(max(A,B))) to Muon/Aurora groups")
+    parser.add_argument("--inline_eval_cmd", type=str, default="",
+                        help="Shell command run on rank-0 at every save_steps. Model+optimizer "
+                             "are moved to CPU (and CUDA cache cleared) before the command runs, "
+                             "and moved back to GPU after it returns. The literal '{step}' in the "
+                             "command is replaced with the current step number.")
+    parser.add_argument("--resume_from", type=str, default="",
+                        help="(unused placeholder for future resume support — current rolling "
+                             "eval flow uses --inline_eval_cmd instead)")
+    parser.add_argument("--lr_total_steps", type=int, default=0,
+                        help="(unused placeholder; --max_steps drives cosine in current flow)")
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--logging_steps", type=int, default=1)
