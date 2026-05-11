@@ -228,8 +228,13 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
 class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
     """
     Non-distributed variant of MuonWithAuxAdam.
+
+    Set update_fn=aurora_update (from aurora.py) instead of the default
+    muon_update to switch the Muon groups' update rule. The signature is
+    identical: (grad, momentum, beta) -> update tensor.
     """
-    def __init__(self, param_groups):
+    def __init__(self, param_groups, update_fn=None):
+        self._update_fn = update_fn or muon_update
         for group in param_groups:
             assert "use_muon" in group
             if group["use_muon"]:
@@ -264,7 +269,7 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                     state = self.state[p]
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
-                    update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                    update = self._update_fn(p.grad, state["momentum_buffer"], beta=group["momentum"])
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
             else:

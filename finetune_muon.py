@@ -18,6 +18,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM
 from muon import SingleDeviceMuonWithAuxAdam
+from aurora import aurora_update
 
 IGNORE_INDEX = -100
 
@@ -166,7 +167,7 @@ def collate_fn(batch, pad_token_id):
     return dict(input_ids=input_ids, labels=labels, attention_mask=attention_mask)
 
 
-def build_optimizer(model, muon_lr, adam_lr, muon_momentum, weight_decay):
+def build_optimizer(model, muon_lr, adam_lr, muon_momentum, weight_decay, use_aurora=False):
     muon_params = []
     adam_params = []
     for name, param in model.named_parameters():
@@ -179,14 +180,16 @@ def build_optimizer(model, muon_lr, adam_lr, muon_momentum, weight_decay):
 
     muon_count = sum(p.numel() for p in muon_params)
     adam_count = sum(p.numel() for p in adam_params)
-    print(f"Muon params: {muon_count:,} | Adam params: {adam_count:,}")
+    rule = "Aurora" if use_aurora else "Muon"
+    print(f"{rule} params: {muon_count:,} | Adam params: {adam_count:,}")
 
     if muon_params:
         param_groups = [
             dict(params=muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay, use_muon=True),
             dict(params=adam_params, lr=adam_lr, betas=(0.9, 0.95), eps=1e-10, weight_decay=weight_decay, use_muon=False),
         ]
-        return SingleDeviceMuonWithAuxAdam(param_groups)
+        update_fn = aurora_update if use_aurora else None
+        return SingleDeviceMuonWithAuxAdam(param_groups, update_fn=update_fn)
     else:
         # No Muon params (e.g. freeze_transformer), use plain Adam
         return torch.optim.AdamW(adam_params, lr=adam_lr, betas=(0.9, 0.95), eps=1e-10, weight_decay=weight_decay)
@@ -276,7 +279,8 @@ def train(args):
     )
 
     # Optimizer (build on raw model so param names don't have DDP "module." prefix)
-    optimizer = build_optimizer(raw_model, args.muon_lr, args.adam_lr, args.muon_momentum, args.weight_decay)
+    optimizer = build_optimizer(raw_model, args.muon_lr, args.adam_lr, args.muon_momentum, args.weight_decay,
+                                use_aurora=args.use_aurora)
 
     # LR scheduler
     def lr_lambda(step):
@@ -382,6 +386,8 @@ if __name__ == "__main__":
     parser.add_argument("--muon_lr", type=float, default=0.001)
     parser.add_argument("--adam_lr", type=float, default=1e-4)
     parser.add_argument("--muon_momentum", type=float, default=0.95)
+    parser.add_argument("--use_aurora", action="store_true",
+                        help="Use Aurora update rule (leverage-uniform polar) instead of standard Muon")
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--logging_steps", type=int, default=1)
