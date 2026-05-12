@@ -205,7 +205,10 @@ def train(args):
     is_main = (local_rank == 0)
     import torch.distributed as dist
     if is_distributed:
-        dist.init_process_group("nccl")
+        # Long NCCL timeout — inline eval can take ~60min, during which
+        # rank-1 sits at dist.barrier(). Default 10min triggers SIGABRT.
+        import datetime
+        dist.init_process_group("nccl", timeout=datetime.timedelta(hours=2))
         torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
