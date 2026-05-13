@@ -287,14 +287,21 @@ def train(args):
     optimizer = build_optimizer(raw_model, args.muon_lr, args.adam_lr, args.muon_momentum, args.weight_decay,
                                 use_aurora=args.use_aurora, moonshot_scaling=args.moonshot_scaling)
 
-    # LR scheduler: linear warmup, then linear decay from 1.0 down to min_lr_ratio.
-    # Setting min_lr_ratio > 0 (e.g. 0.1) avoids the "decay-to-zero wastes last steps"
-    # pathology — matches Llama/Qwen practice of peak/10 as the floor.
+    # LR scheduler: linear warmup, then decay to min_lr_ratio*peak floor.
+    # Default schedule is cosine (Llama/Qwen standard); linear available for back-compat.
+    # min_lr_ratio > 0 (e.g. 0.1) avoids the "decay-to-zero wastes last steps" pathology.
+    import math
     def lr_lambda(step):
         if step < args.warmup_steps:
             return step / max(1, args.warmup_steps)
         progress = (step - args.warmup_steps) / max(1, args.max_steps - args.warmup_steps)
-        return max(args.min_lr_ratio, 1.0 - progress * (1.0 - args.min_lr_ratio))
+        progress = min(1.0, progress)
+        if args.lr_schedule == "cosine":
+            # Cosine from 1.0 to min_lr_ratio
+            factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return args.min_lr_ratio + (1.0 - args.min_lr_ratio) * factor
+        else:
+            return max(args.min_lr_ratio, 1.0 - progress * (1.0 - args.min_lr_ratio))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # Training loop
@@ -446,6 +453,9 @@ if __name__ == "__main__":
     parser.add_argument("--min_lr_ratio", type=float, default=0.1,
                         help="Floor for the LR schedule, as a fraction of peak LR. Default 0.1 matches "
                              "Llama/Qwen practice (peak/10). Set to 0 to recover old decay-to-zero behavior.")
+    parser.add_argument("--lr_schedule", choices=["cosine", "linear"], default="cosine",
+                        help="LR decay shape after warmup. Default cosine (Llama/Qwen standard). "
+                             "Set 'linear' for older behavior.")
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--logging_steps", type=int, default=1)
