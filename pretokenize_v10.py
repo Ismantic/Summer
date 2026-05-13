@@ -66,6 +66,18 @@ ANNEAL_WEIGHTS = {
     "OpenWebMath":0.08,
 }
 
+# v11 anneal mix: v8-style narrow high-quality, NO code/math (v10 results
+# suggest code/math in Phase 1 hurt BLEU; for v11 we anneal on v8 P1 ckpt
+# with the same source family, just narrowed to 6 highest-quality sources).
+V11_ANNEAL_WEIGHTS = {
+    "FineWebEdu":   0.32,
+    "Wikipedia_EN": 0.18,
+    "Gutenberg":    0.08,
+    "SkyPile":      0.18,
+    "Wikipedia_CN": 0.15,
+    "CCI3-HQ":      0.09,
+}
+
 
 def iter_text(fmt, files, field):
     for path in files:
@@ -169,7 +181,7 @@ def build_shards(weights, total_tokens, n_workers, tmpdir, seq_len, max_line_cha
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--mix", choices=["main", "anneal"], required=True)
+    p.add_argument("--mix", choices=["main", "anneal", "v11_anneal"], required=True)
     p.add_argument("--tokenizer_model", required=True)
     p.add_argument("--cn_dict", default="")
     p.add_argument("--output", required=True)
@@ -180,7 +192,8 @@ def main():
     p.add_argument("--num_workers", type=int, default=28)
     args = p.parse_args()
 
-    weights = MAIN_WEIGHTS if args.mix == "main" else ANNEAL_WEIGHTS
+    weights = {"main": MAIN_WEIGHTS, "anneal": ANNEAL_WEIGHTS,
+               "v11_anneal": V11_ANNEAL_WEIGHTS}[args.mix]
     total_w = sum(weights.values())
     print(f"Mix: {args.mix} | sources: {len(weights)} | total weight {total_w:.3f}")
     print(f"Budget: {args.total_tokens:,} tokens "
