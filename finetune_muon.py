@@ -287,12 +287,14 @@ def train(args):
     optimizer = build_optimizer(raw_model, args.muon_lr, args.adam_lr, args.muon_momentum, args.weight_decay,
                                 use_aurora=args.use_aurora, moonshot_scaling=args.moonshot_scaling)
 
-    # LR scheduler
+    # LR scheduler: linear warmup, then linear decay from 1.0 down to min_lr_ratio.
+    # Setting min_lr_ratio > 0 (e.g. 0.1) avoids the "decay-to-zero wastes last steps"
+    # pathology — matches Llama/Qwen practice of peak/10 as the floor.
     def lr_lambda(step):
         if step < args.warmup_steps:
             return step / max(1, args.warmup_steps)
         progress = (step - args.warmup_steps) / max(1, args.max_steps - args.warmup_steps)
-        return max(0.0, 1.0 - progress)
+        return max(args.min_lr_ratio, 1.0 - progress * (1.0 - args.min_lr_ratio))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # Training loop
@@ -441,6 +443,9 @@ if __name__ == "__main__":
                              "eval flow uses --inline_eval_cmd instead)")
     parser.add_argument("--lr_total_steps", type=int, default=0,
                         help="(unused placeholder; --max_steps drives cosine in current flow)")
+    parser.add_argument("--min_lr_ratio", type=float, default=0.1,
+                        help="Floor for the LR schedule, as a fraction of peak LR. Default 0.1 matches "
+                             "Llama/Qwen practice (peak/10). Set to 0 to recover old decay-to-zero behavior.")
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--logging_steps", type=int, default=1)
