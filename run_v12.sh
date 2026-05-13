@@ -63,7 +63,7 @@ cd $SUMMER && $TORCHRUN --nproc_per_node=2 --master_port=29505 finetune_muon.py 
     --warmup_steps 500 \
     --adam_lr 1e-4 \
     --max_grad_norm 1.0 \
-    --save_steps 5000 \
+    --save_steps 1000 \
     --logging_steps 100 \
     --inline_eval_cmd "$INLINE_EVAL_P1"
 
@@ -84,7 +84,7 @@ cd $SUMMER && $TORCHRUN --nproc_per_node=2 --master_port=29505 finetune_muon.py 
     --adam_lr 5e-5 \
     --max_grad_norm 1.0 \
     --use_aurora \
-    --save_steps 2000 \
+    --save_steps 500 \
     --logging_steps 100 \
     --inline_eval_cmd "$INLINE_EVAL_P2"
 
