@@ -28,21 +28,24 @@ RESULTS_DIR=$SUMMER/eval_results/full/$TAG
 ln -sfn $CKPT $TAG_DIR
 mkdir -p $RESULTS_DIR
 
+# Translation eval (BLEU 1000 + COMET, ~13 min) runs at EVERY save — lets us
+# spot generation-degeneration trajectory early (v13 lesson). Mono tasks only
+# run at FINAL_STEP to keep per-save overhead manageable.
+echo "[inline_eval] BLEU+COMET 1000-sample for step $STEP"
+CUDA_VISIBLE_DEVICES=0 $PYTHON -u $SUMMER/eval_pretrain_translate.py \
+    --model_path $TAG_DIR \
+    --testset wmt22 --exemplar_set wmt21 --direction both \
+    --num_fewshot 5 --max_samples 1000 --batch_size 16 \
+    --save_all_samples \
+    --compute_comet \
+    --comet_model_path /mnt/data/Summer-data/comet-wmt22-da \
+    --output_path $RESULTS_DIR/wmt22.json \
+    > $RESULTS_DIR/wmt22.log 2>&1
+echo "[inline_eval] BLEU+COMET done for step $STEP"
+grep -E "BLEU|COMET" $RESULTS_DIR/wmt22.log | head -4 || true
+
 if [ "$STEP" = "$FINAL_STEP" ]; then
-    echo "[inline_eval] FULL eval for final step $STEP — BLEU + COMET FIRST"
-    # BLEU+COMET first: saves all translations and runs COMET in same process.
-    # COMET model loaded from local /mnt/data/Summer-data/comet-wmt22-da.
-    CUDA_VISIBLE_DEVICES=0 $PYTHON -u $SUMMER/eval_pretrain_translate.py \
-        --model_path $TAG_DIR \
-        --testset wmt22 --exemplar_set wmt21 --direction both \
-        --num_fewshot 5 --max_samples 1000 --batch_size 16 \
-        --save_all_samples \
-        --compute_comet \
-        --comet_model_path /mnt/data/Summer-data/comet-wmt22-da \
-        --output_path $RESULTS_DIR/wmt22.json \
-        > $RESULTS_DIR/wmt22.log 2>&1
-    echo "[inline_eval] BLEU+COMET done for step $STEP — see $RESULTS_DIR/wmt22.log"
-    grep -E "BLEU|COMET" $RESULTS_DIR/wmt22.log | head -4 || true
+    echo "[inline_eval] FINAL: add PPL + mono + MMLU"
 
     # PPL (cheap, ~3 min)
     CUDA_VISIBLE_DEVICES=0 $PYTHON -u $SUMMER/eval_ppl.py \
@@ -63,24 +66,7 @@ if [ "$STEP" = "$FINAL_STEP" ]; then
         --model_path $TAG_DIR --task mmlu --num_fewshot 5 \
         --output_path $RESULTS_DIR/mmlu/result.json \
         > $RESULTS_DIR/mmlu.log 2>&1 || true
-    echo "[inline_eval] FULL eval done for step $STEP"
+    echo "[inline_eval] FINAL FULL eval done for step $STEP"
 else
-    echo "[inline_eval] LIGHT eval for step $STEP (lambada + piqa + arc_c only)"
-    for spec in "lambada_openai:0" "piqa:5" "arc_challenge:25"; do
-        task=${spec%:*}
-        shots=${spec#*:}
-        CUDA_VISIBLE_DEVICES=0 $PYTHON $SUMMER/eval_with_piece.py \
-            --model_path $TAG_DIR \
-            --task $task --num_fewshot $shots \
-            --output_path $RESULTS_DIR/$task/result.json \
-            > $RESULTS_DIR/$task.log 2>&1 || true
-    done
-    # also do a quick BLEU 200-sample to track translation trend (fast)
-    CUDA_VISIBLE_DEVICES=0 $PYTHON -u $SUMMER/eval_pretrain_translate.py \
-        --model_path $TAG_DIR \
-        --testset wmt22 --exemplar_set wmt21 --direction both \
-        --num_fewshot 5 --max_samples 200 --batch_size 16 \
-        --output_path $RESULTS_DIR/wmt22_light.json \
-        > $RESULTS_DIR/wmt22_light.log 2>&1 || true
-    echo "[inline_eval] light eval done for step $STEP"
+    echo "[inline_eval] intermediate done for step $STEP (translation only)"
 fi
