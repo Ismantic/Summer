@@ -119,7 +119,7 @@ def trim_continuation(text: str, src_label: str) -> str:
 
 
 def evaluate(model, tokenizer, direction, testset, exemplar_set, num_fewshot,
-             max_samples, batch_size, max_new_tokens, seed):
+             max_samples, batch_size, max_new_tokens, seed, save_all_samples=False):
     sources, references = load_pair(testset, direction)
     if max_samples:
         sources = sources[:max_samples]
@@ -153,6 +153,7 @@ def evaluate(model, tokenizer, direction, testset, exemplar_set, num_fewshot,
         translations, [references],
         tokenize="zh" if direction == "en-zh" else "13a",
     )
+    n_save = len(sources) if save_all_samples else min(5, len(sources))
     return {
         "direction": direction,
         "testset": testset,
@@ -161,11 +162,29 @@ def evaluate(model, tokenizer, direction, testset, exemplar_set, num_fewshot,
         "n_samples": len(sources),
         "bleu": bleu.score,
         "time_s": time.time() - t0,
+        "translations": translations if save_all_samples else None,
         "samples": [
             dict(src=sources[k], hyp=translations[k], ref=references[k])
-            for k in range(min(5, len(sources)))
+            for k in range(n_save)
         ],
+        "_sources": sources,
+        "_references": references,
     }
+
+
+def compute_comet(sources, translations, references, comet_model_path, batch_size=16):
+    """Compute COMET score using a local Unbabel/wmt22-comet-da snapshot."""
+    from comet import load_from_checkpoint
+    import glob
+    # COMET package expects a .ckpt file inside the model dir
+    ckpts = glob.glob(f"{comet_model_path}/**/*.ckpt", recursive=True)
+    if not ckpts:
+        raise FileNotFoundError(f"No .ckpt found under {comet_model_path}")
+    model = load_from_checkpoint(ckpts[0])
+    data = [{"src": s, "mt": t, "ref": r}
+            for s, t, r in zip(sources, translations, references)]
+    output = model.predict(data, batch_size=batch_size, gpus=1, progress_bar=False)
+    return float(output.system_score), [float(x) for x in output.scores]
 
 
 def main():
@@ -182,6 +201,12 @@ def main():
     p.add_argument("--max_new_tokens", type=int, default=256)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output_path", default=None)
+    p.add_argument("--compute_comet", action="store_true",
+                   help="Compute COMET score (Unbabel/wmt22-comet-da) in addition to BLEU.")
+    p.add_argument("--comet_model_path", default="/mnt/data/Summer-data/comet-wmt22-da",
+                   help="Local snapshot of Unbabel/wmt22-comet-da")
+    p.add_argument("--save_all_samples", action="store_true",
+                   help="Save all translation samples in output JSON (else first 5).")
     args = p.parse_args()
     if args.exemplar_set == args.testset:
         raise ValueError("--exemplar_set must differ from --testset to avoid leakage")
@@ -199,7 +224,8 @@ def main():
         print(f"\n=== {d} (testset={args.testset}, {args.num_fewshot}-shot) ===")
         r = evaluate(model, tokenizer, d, args.testset, args.exemplar_set,
                      args.num_fewshot, args.max_samples, args.batch_size,
-                     args.max_new_tokens, args.seed)
+                     args.max_new_tokens, args.seed,
+                     save_all_samples=args.save_all_samples)
         print(f"  BLEU = {r['bleu']:.2f}  ({r['n_samples']} samples, {r['time_s']:.0f}s)")
         for s in r["samples"][:3]:
             print(f"    src: {s['src'][:80]}")
@@ -207,9 +233,38 @@ def main():
             print(f"    ref: {s['ref'][:80]}")
         out["results"][d] = r
 
+    # COMET: compute AFTER generation model fully unloaded GPU (free for XLM-R loading)
+    if args.compute_comet:
+        print("\nFreeing translation model GPU mem before loading COMET...")
+        del model
+        import gc, torch as _torch
+        gc.collect(); _torch.cuda.empty_cache()
+        for d in directions:
+            r = out["results"][d]
+            sources = r.pop("_sources")
+            references = r.pop("_references")
+            translations = r.get("translations") or [s["hyp"] for s in r["samples"]]
+            if r.get("translations") is None:
+                print(f"  WARN: {d} missing full translations (use --save_all_samples for COMET on full set)")
+                continue
+            print(f"\n=== COMET {d} ===")
+            t0 = time.time()
+            system_score, per_sample = compute_comet(
+                sources, translations, references, args.comet_model_path)
+            print(f"  COMET = {system_score:.4f}  (time {time.time()-t0:.0f}s)")
+            r["comet"] = system_score
+            r["comet_per_sample"] = per_sample
+    else:
+        for d in directions:
+            out["results"][d].pop("_sources", None)
+            out["results"][d].pop("_references", None)
+
     print("\n=== Summary ===")
     for d, r in out["results"].items():
-        print(f"  {d}: BLEU = {r['bleu']:.2f}")
+        line = f"  {d}: BLEU = {r['bleu']:.2f}"
+        if "comet" in r:
+            line += f"  COMET = {r['comet']:.4f}"
+        print(line)
 
     if args.output_path:
         os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
