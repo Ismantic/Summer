@@ -29,16 +29,20 @@ ln -sfn $CKPT $TAG_DIR
 mkdir -p $RESULTS_DIR
 
 if [ "$STEP" = "$FINAL_STEP" ]; then
-    echo "[inline_eval] FULL eval for final step $STEP — BLEU FIRST"
-    # BLEU first (most important downstream metric — user wants early feedback)
+    echo "[inline_eval] FULL eval for final step $STEP — BLEU + COMET FIRST"
+    # BLEU+COMET first: saves all translations and runs COMET in same process.
+    # COMET model loaded from local /mnt/data/Summer-data/comet-wmt22-da.
     CUDA_VISIBLE_DEVICES=0 $PYTHON -u $SUMMER/eval_pretrain_translate.py \
         --model_path $TAG_DIR \
         --testset wmt22 --exemplar_set wmt21 --direction both \
         --num_fewshot 5 --max_samples 1000 --batch_size 16 \
+        --save_all_samples \
+        --compute_comet \
+        --comet_model_path /mnt/data/Summer-data/comet-wmt22-da \
         --output_path $RESULTS_DIR/wmt22.json \
         > $RESULTS_DIR/wmt22.log 2>&1
-    echo "[inline_eval] BLEU done for step $STEP — see $RESULTS_DIR/wmt22.log"
-    grep BLEU $RESULTS_DIR/wmt22.log | head -2 || true
+    echo "[inline_eval] BLEU+COMET done for step $STEP — see $RESULTS_DIR/wmt22.log"
+    grep -E "BLEU|COMET" $RESULTS_DIR/wmt22.log | head -4 || true
 
     # PPL (cheap, ~3 min)
     CUDA_VISIBLE_DEVICES=0 $PYTHON -u $SUMMER/eval_ppl.py \
