@@ -15,6 +15,13 @@ export PYTHONUNBUFFERED=1
 unset http_proxy https_proxy 2>/dev/null
 export HF_ENDPOINT=https://hf-mirror.com
 
+# HF/datasets offline mode — avoids 10s HEAD timeouts + redundant "Generating split"
+# passes for already-cached datasets. mmlu task-dict load drops from ~166s to ~2s.
+# Caches must already exist (~/.cache/huggingface/datasets/{cais___mmlu,...}).
+export HF_DATASETS_OFFLINE=1
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
 # Strip torchrun env so vLLM's torch.distributed doesn't rendezvous with
 # the parent training group.
 unset MASTER_ADDR MASTER_PORT WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE
@@ -60,15 +67,15 @@ if [ "$STEP" = "$FINAL_STEP" ]; then
         --model_path $TAG_DIR --valid_pt $SUMMER/output/valid_512.pt --batch_size 16 \
         --output_path $RESULTS_DIR/ppl.json > $RESULTS_DIR/ppl.log 2>&1 || true
 
-    # Mono tasks via vLLM (5-10x faster than transformers backend)
-    for spec in "lambada_openai:0" "piqa:5" "arc_challenge:25" "hellaswag:10" "mmlu:5"; do
-        task=${spec%:*}; shots=${spec#*:}
-        CUDA_VISIBLE_DEVICES=0 $PYTHON $SUMMER/eval_with_piece_vllm.py \
-            --model_path $TAG_DIR --task $task --num_fewshot $shots \
-            --max_model_len 4096 \
-            --output_path $RESULTS_DIR/$task/result.json \
-            > $RESULTS_DIR/$task.log 2>&1 || true
-    done
+    # Mono tasks via vLLM in BATCH mode — one vLLM load, all tasks back-to-back.
+    # Expanded suite: original 5 + CMMLU (Chinese MMLU) + C-Eval + GSM8K (math).
+    # 8-task batch, HF offline, single vLLM load — full run ~8-12min after datasets cached.
+    CUDA_VISIBLE_DEVICES=0 $PYTHON $SUMMER/eval_with_piece_vllm.py \
+        --model_path $TAG_DIR \
+        --tasks "lambada_openai:0,piqa:5,arc_challenge:25,hellaswag:10,mmlu:5,ceval-valid:5,gsm8k:5" \
+        --output_dir $RESULTS_DIR \
+        --max_model_len 4096 \
+        > $RESULTS_DIR/mono_batch.log 2>&1 || true
     echo "[inline_eval_v2] FINAL FULL eval done for step $STEP"
 else
     echo "[inline_eval_v2] intermediate done for step $STEP (translation only)"

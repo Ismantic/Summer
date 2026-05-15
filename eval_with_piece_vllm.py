@@ -23,6 +23,13 @@ import json
 import os
 import sys
 
+# Force HF datasets/hub offline. lm_eval otherwise does 10s-timeout HEAD requests
+# per dataset and re-runs `Generating split` cosmetics even when local cache is
+# valid. Setting this before imports brings mmlu task-dict load from ~166s to ~2s.
+os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Stub ray to avoid lm_eval import chain pulling it in. We don't use data
@@ -214,44 +221,59 @@ class VLLMPiece(TemplateLM):
 
     # ---- generation ----
     def generate_until(self, requests, disable_tqdm=False):
+        """Batch all gen requests in ONE vLLM call (groups by gen_kwargs signature).
+        gsm8k 1319 docs: ~22min sequential → ~30s batched. Same algorithm just
+        vectorized — vLLM does continuous batching internally."""
         from vllm import SamplingParams
         from vllm.inputs import TokensPrompt
 
-        res = []
-        pbar = tqdm(total=len(requests), disable=disable_tqdm,
-                    desc="generate_until (vLLM)")
-
-        # vLLM batches well — collect all then dispatch in one call per gen_kwargs
-        # signature. Most tasks use the same gen_kwargs across requests.
-        for req in requests:
+        # Group requests by their gen_kwargs (most tasks have one signature for all docs)
+        groups: dict[tuple, list[tuple[int, str, list[str]]]] = {}
+        for i, req in enumerate(requests):
             context, gen_kwargs = req.args
             until = gen_kwargs.get("until", [])
             if isinstance(until, str):
                 until = [until]
             max_tokens = int(gen_kwargs.get("max_gen_toks", 256))
+            temp = float(gen_kwargs.get("temperature", 0.0))
+            top_p = float(gen_kwargs.get("top_p", 1.0))
+            # Hashable key for grouping
+            key = (max_tokens, temp, top_p, tuple(until))
+            groups.setdefault(key, []).append((i, context, until))
 
-            ctx_enc = self.tok_encode(context)[-self.max_length + max_tokens:]
+        res: list[str | None] = [None] * len(requests)
+        pbar = tqdm(total=len(requests), disable=disable_tqdm,
+                    desc="generate_until (vLLM)")
+        for (max_tokens, temp, top_p, until), batch in groups.items():
             sampling = SamplingParams(
-                temperature=float(gen_kwargs.get("temperature", 0.0)),
-                top_p=float(gen_kwargs.get("top_p", 1.0)),
+                temperature=temp,
+                top_p=top_p,
                 max_tokens=max_tokens,
-                stop=until if until else None,
+                stop=list(until) if until else None,
                 stop_token_ids=[self.eot_token_id],
             )
-            output = self.model.generate(
-                [TokensPrompt(prompt_token_ids=ctx_enc)],
-                sampling_params=sampling,
-                use_tqdm=False,
-            )
-            gen_ids = list(output[0].outputs[0].token_ids)
-            text = self.tok_decode(gen_ids, skip_special_tokens=True)
-            # Belt-and-braces: also slice at first stop seq in case vLLM
-            # doesn't catch a multi-token stop string
-            for stop in until:
-                if stop in text:
-                    text = text.split(stop)[0]
-            res.append(text)
-            pbar.update(1)
+            # Encode all contexts in this group
+            prompts = []
+            indices = []
+            for i, context, _ in batch:
+                ctx_enc = self.tok_encode(context)
+                # Left-truncate if total prompt+gen exceeds max_length
+                budget = self.max_length - max_tokens - 1
+                if len(ctx_enc) > budget:
+                    ctx_enc = ctx_enc[-budget:]
+                prompts.append(TokensPrompt(prompt_token_ids=ctx_enc))
+                indices.append(i)
+
+            outputs = self.model.generate(prompts, sampling_params=sampling, use_tqdm=False)
+            for i, idx, output in zip(range(len(batch)), indices, outputs):
+                gen_ids = list(output.outputs[0].token_ids)
+                text = self.tok_decode(gen_ids, skip_special_tokens=True)
+                # Slice at first stop seq (vLLM may not catch multi-token stops)
+                for stop in until:
+                    if stop and stop in text:
+                        text = text.split(stop)[0]
+                res[idx] = text
+                pbar.update(1)
         pbar.close()
         return res
 
@@ -259,43 +281,86 @@ class VLLMPiece(TemplateLM):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", required=True)
-    parser.add_argument("--task", required=True)
+    # Single-task mode (backward compat)
+    parser.add_argument("--task", default=None)
     parser.add_argument("--num_fewshot", type=int, default=None)
+    parser.add_argument("--output_path", default=None,
+                        help="Single-task mode: full path to result.json")
+    # Batch mode: run multiple tasks reusing one vLLM init (~5-10min saved on full mono sweep)
+    parser.add_argument("--tasks", default=None,
+                        help="Batch mode: comma-separated task:fewshot specs, "
+                             "e.g. lambada_openai:0,piqa:5,arc_challenge:25,hellaswag:10,mmlu:5")
+    parser.add_argument("--output_dir", default=None,
+                        help="Batch mode: result.json saved to <output_dir>/<task>/result.json")
+    # Common
     parser.add_argument("--batch_size", default="auto")
-    parser.add_argument("--output_path", default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max_model_len", type=int, default=4096)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.85)
     args = parser.parse_args()
 
-    from lm_eval import simple_evaluate
+    # Validate args
+    if args.tasks and args.task:
+        raise ValueError("Pass either --task (single) or --tasks (batch), not both")
+    if not args.tasks and not args.task:
+        raise ValueError("Must pass --task or --tasks")
+    if args.tasks and not args.output_dir:
+        raise ValueError("--tasks requires --output_dir")
 
-    results = simple_evaluate(
-        model="vllm_piece",
-        model_args=(
-            f"pretrained={args.model_path},"
-            f"dtype=bfloat16,"
-            f"max_model_len={args.max_model_len},"
-            f"gpu_memory_utilization={args.gpu_memory_utilization}"
-        ),
-        tasks=[args.task],
-        num_fewshot=args.num_fewshot,
+    # Parse specs into list of (task, shots)
+    if args.tasks:
+        specs = []
+        for s in args.tasks.split(","):
+            t, _, n = s.strip().partition(":")
+            specs.append((t, int(n) if n else None))
+    else:
+        specs = [(args.task, args.num_fewshot)]
+
+    # Load vLLM model ONCE — reuse across all tasks
+    print(f"Loading vLLM engine from {args.model_path}...")
+    lm = VLLMPiece(
+        pretrained=args.model_path,
+        dtype="bfloat16",
+        max_model_len=args.max_model_len,
+        gpu_memory_utilization=args.gpu_memory_utilization,
         batch_size=args.batch_size,
-        limit=args.limit,
     )
 
-    out = {
-        "task": args.task,
-        "num_fewshot": args.num_fewshot,
-        "results": results["results"],
-    }
-    print(json.dumps(out, indent=2, default=str))
+    from lm_eval import simple_evaluate
 
-    if args.output_path:
-        os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
-        with open(args.output_path, "w") as f:
-            json.dump(out, f, indent=2, default=str)
-        print(f"\nSaved to {args.output_path}")
+    for task, shots in specs:
+        print(f"\n========== {task} ({shots}-shot) ==========")
+        results = simple_evaluate(
+            model=lm,                # reuse loaded model
+            tasks=[task],
+            num_fewshot=shots,
+            batch_size=args.batch_size,
+            limit=args.limit,
+        )
+        out = {
+            "task": task,
+            "num_fewshot": shots,
+            "results": results["results"],
+        }
+        # Decide output path
+        if args.tasks:
+            out_path = os.path.join(args.output_dir, task, "result.json")
+        else:
+            out_path = args.output_path
+
+        if out_path:
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            with open(out_path, "w") as f:
+                json.dump(out, f, indent=2, default=str)
+            print(f"Saved to {out_path}")
+
+        # Quick summary print
+        for sub, m in results["results"].items():
+            if isinstance(m, dict):
+                for k in ("acc_norm,none", "acc,none"):
+                    if k in m and isinstance(m[k], (int, float)):
+                        print(f"  {sub}: {k}={m[k]:.4f}")
+                        break
 
 
 if __name__ == "__main__":
