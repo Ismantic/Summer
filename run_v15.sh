@@ -34,7 +34,7 @@ cd $SUMMER && $TORCHRUN --nproc_per_node=2 --master_port=29508 finetune_muon.py 
     --batch_size 32 \
     --gradient_accumulation_steps 4 \
     --max_steps 7500 \
-    --warmup_steps 750 \
+    --warmup_steps 1000 \
     --adam_lr 1e-4 \
     --min_lr_ratio 0.01 \
     --lr_schedule cosine \
