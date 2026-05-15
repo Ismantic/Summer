@@ -65,11 +65,16 @@ def load_mono(tag, task):
 
 
 def load_translation(tag):
-    """Return (zh_en_bleu, zh_en_comet, en_zh_bleu, en_zh_comet) from vLLM retro eval."""
-    for path in [
+    """Return (zh_en_bleu, zh_en_comet, en_zh_bleu, en_zh_comet) from vLLM retro eval.
+    v16 special-cased to use step2000 ckpt (mono uses 'v16_p2', translation eval was
+    saved under 'v16_p2_step2000')."""
+    cands = [
         f"{DIR}/{tag}_vllm/wmt22.json",
         f"{DIR}/{tag}/wmt22.json",
-    ]:
+    ]
+    if tag == "v16_p2":
+        cands.append(f"{DIR}/v16_p2_step2000/wmt22.json")
+    for path in cands:
         if os.path.exists(path):
             try:
                 r = json.load(open(path))["results"]
