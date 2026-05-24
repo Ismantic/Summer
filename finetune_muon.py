@@ -249,6 +249,44 @@ def train(args):
             return grad * (1.0 - frozen_mask)
         model.model.embed_tokens.weight.register_hook(_zero_frozen_grads)
 
+    # LoRA wrap (peft) — Phase 2 高效微调：transformer 用 LoRA adapter，
+    # embed_tokens + lm_head 通过 modules_to_save 全参数训。
+    # --lora_tie_embed_head: 走 tie-safe 路径，避免 PEFT ModulesToSave 的 deepcopy
+    # 破坏 embed/lm_head 的 weight 共享（默认 False 保持 v17/v18 旧行为）。
+    if args.use_lora:
+        from peft import LoraConfig, get_peft_model
+        if args.freeze_transformer:
+            log("WARNING: --use_lora overrides --freeze_transformer")
+            # peft 会自己冻结 base 参数；之前 freeze 的 requires_grad=False 不影响 LoRA
+        if args.lora_tie_embed_head:
+            mts = []  # 不交给 ModulesToSave，避免 deepcopy 破坏 tie
+        else:
+            mts = ["embed_tokens", "lm_head"]
+        lora_cfg = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            target_modules=args.lora_target.split(","),
+            lora_dropout=0.0,
+            bias="none",
+            task_type="CAUSAL_LM",
+            modules_to_save=mts,
+        )
+        model = get_peft_model(model, lora_cfg)
+        if args.lora_tie_embed_head:
+            # 手动 unfreeze 原始 embed_tokens；lm_head 因 tie 自动同步（共享 tensor）
+            for n, p in model.named_parameters():
+                if "embed_tokens" in n and "lora_" not in n.lower():
+                    p.requires_grad_(True)
+            # 验证 tie 仍然保持
+            emb_w = model.base_model.model.model.embed_tokens.weight
+            head_w = model.base_model.model.lm_head.weight
+            if emb_w.data_ptr() == head_w.data_ptr():
+                log(f"[tie-safe] embed/lm_head share storage ✓ (data_ptr matches)")
+            else:
+                log(f"[tie-safe] WARN: embed/lm_head no longer share storage!")
+        if is_main:
+            model.print_trainable_parameters()
+
     # Wrap with DDP after freeze logic + grad-hook registration (so the hook
     # binds to the underlying parameter, not the DDP-replicated one).
     raw_model = model
@@ -258,6 +296,12 @@ def train(args):
         # transformer params with requires_grad=False; DDP's autograd-graph
         # check needs this hint when not all params get grads each step.
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=args.freeze_transformer)
+
+    # torch.compile — kernel fusion, ~20-40% speedup. raw_model stays uncompiled
+    # so checkpoint save / inline-eval CPU-offload operate on the original module.
+    if args.compile:
+        model = torch.compile(model)
+        log("torch.compile enabled")
 
     # Dataset
     pad_token_id = tokenizer.pad_token_id
@@ -403,7 +447,12 @@ def train(args):
                     # Inline eval (CPU-offload pattern) if requested
                     _inline_eval(step)
 
-    # Save final model (only main rank)
+    # Save final model (only main rank).
+    # LoRA: 合并 adapter + base，存成普通 transformers checkpoint，eval 直接加载。
+    if args.use_lora and args.output_dir and is_main:
+        log("Merging LoRA into base for final save...")
+        raw_model = raw_model.merge_and_unload()
+
     if args.output_dir and is_main:
         os.makedirs(args.output_dir, exist_ok=True)
         raw_model.config.use_cache = True
@@ -428,6 +477,17 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--gradient_checkpointing", action="store_true")
+    parser.add_argument("--compile", action="store_true",
+                        help="Wrap model in torch.compile for kernel fusion (~20-40% speedup)")
+    # LoRA（peft）—— 通常用于 Phase 2 在单卡上对 transformer 做高效微调
+    parser.add_argument("--use_lora", action="store_true",
+                        help="Wrap base model with LoRA (peft); embed_tokens + lm_head 全参训")
+    parser.add_argument("--lora_r", type=int, default=16)
+    parser.add_argument("--lora_alpha", type=int, default=32)
+    parser.add_argument("--lora_tie_embed_head", action="store_true",
+                        help="保持 embed_tokens 和 lm_head 共享 weight (避免 PEFT 副作用 untie)")
+    parser.add_argument("--lora_target", type=str, default="q_proj,v_proj",
+                        help="Comma-separated target_modules for LoRA")
     parser.add_argument("--freeze_transformer", action="store_true", help="Only train embed_tokens + lm_head")
     parser.add_argument("--freeze_mapped_embeds", type=str, default=None,
                         help="Path to JSON list of token IDs to freeze (one-to-one mapped tokens)")
