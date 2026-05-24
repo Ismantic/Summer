@@ -127,7 +127,12 @@ def _encode_doc(text):
 
 
 def collect_chunks(source, pool, target_tokens, seq_len, max_line_chars):
-    """流式读文档 -> imap 并行 encode（保序）-> 按序 packing 到预分配 int32 数组。"""
+    """分批读文档 -> pool.map 并行 encode（保序、限流）-> packing 到预分配 int32 数组。
+
+    限流关键：每次只把 BATCH 篇文档交给 pool.map（阻塞到该批 encode 完才读下一批），
+    避免 imap 对超大 generator（如 42GB 的 enwiki.jsonl）无限缓冲 —— 那曾让主进程
+    吃到 50GB+ 触发 earlyoom。in-flight 内存 ≈ BATCH 篇文档，受控。
+    """
     target_chunks = max(1, target_tokens // seq_len)
     out = np.empty((target_chunks, seq_len), dtype=np.int32)   # 预分配，避免 list-of-int
     n_filled = 0
@@ -135,27 +140,36 @@ def collect_chunks(source, pool, target_tokens, seq_len, max_line_chars):
     n_docs = 0
     t0 = time.time()
     last_log = 0
+    BATCH = 20000
 
-    def text_gen():
-        for text in iter_text(source):
-            if len(text) > max_line_chars:
-                text = text[:max_line_chars]
-            yield text
+    def flush(batch):
+        nonlocal n_filled, n_docs
+        for ids in pool.map(_encode_doc, batch, chunksize=128):
+            buf.extend(ids)
+            n_docs += 1
+            while len(buf) >= seq_len and n_filled < target_chunks:
+                out[n_filled] = buf[:seq_len]
+                del buf[:seq_len]
+                n_filled += 1
 
-    for ids in pool.imap(_encode_doc, text_gen(), chunksize=64):
-        buf.extend(ids)
-        n_docs += 1
-        while len(buf) >= seq_len and n_filled < target_chunks:
-            out[n_filled] = buf[:seq_len]
-            del buf[:seq_len]
-            n_filled += 1
+    batch = []
+    for text in iter_text(source):
+        if len(text) > max_line_chars:
+            text = text[:max_line_chars]
+        batch.append(text)
+        if len(batch) < BATCH:
+            continue
+        flush(batch)
+        batch = []
         if n_filled >= target_chunks:
             break
-        if n_docs - last_log >= 50000:
+        if n_docs - last_log >= 100000:
             elapsed = time.time() - t0
             print(f"  [{source['name']}] {n_filled:,}/{target_chunks:,} chunks "
                   f"| {n_docs:,} docs | {elapsed:.0f}s", flush=True)
             last_log = n_docs
+    if batch and n_filled < target_chunks:
+        flush(batch)
 
     elapsed = time.time() - t0
     if n_filled < target_chunks:
