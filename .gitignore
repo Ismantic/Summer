@@ -224,3 +224,7 @@ output/
 checkpoints/
 experiments.tsv
 corpus_v17/
+tokenizer_corpus/
+BERT/bert_init/
+BERT/bert_train_ckpt/
+BERT/*.log
