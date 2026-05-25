@@ -1,56 +1,57 @@
-"""BERT-base init(独立可移植,不依赖 Summer 项目):
-  - 12 layers / 768 hidden / 12 heads / 3072 ff
-  - vocab = (piece vocab) + 1(<mask> 占末位 id)
-  - max_position 1024
-  - 随机初始化(BERT 原生,std=0.02)
+"""Char-level BERT init (RoBERTa-style:无 NSP,纯 MLM)。
+
+从 PieceTokenizer 的 piece.model 读 vocab_size,在 BERT 端 +1 给 [MASK]:
+  - piece vocab id ∈ [0, piece_vocab)
+  - BERT vocab_size = piece_vocab + 1
+  - mask_token_id = piece_vocab(在 piece vocab 外,数据不会冲突)
 
 用法:
-  python build_bert_init.py \
-      --piece_dir <含 piece.model + dict.txt + token_mapping.json 的目录> \
-      --output_dir bert_init \
-      --piece_vocab_size 81903
-
-  piece_dir 提供的 5 个文件(piece.model / dict.txt / token_mapping.json /
-  special_tokens_map.json / tokenizer_config.json)会拷到 output_dir 旁,
-  方便后续 inference 加载。
+  python build_bert_init.py --piece_model sp_char_v1/piece.model \
+      --output_dir bert_init --size base|large
 """
 import argparse, os, shutil, torch
 from transformers import BertConfig, BertForMaskedLM
 
 
+SIZE_CFG = {
+    "base":  dict(hidden_size=768,  num_layers=12, num_heads=12,  intermediate_size=3072),
+    # mid: BERT-base 的层数,但 hidden / head / ffn 跟 large 同等(1024×12L)
+    "mid":   dict(hidden_size=1024, num_layers=12, num_heads=16,  intermediate_size=4096),
+    "large": dict(hidden_size=1024, num_layers=24, num_heads=16,  intermediate_size=4096),
+}
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--piece_dir", required=True,
-                    help="含 piece.model / dict.txt 的目录")
+    ap.add_argument("--piece_model", required=True, help="PieceTokenizer 训出的 piece.model")
     ap.add_argument("--output_dir", default="bert_init")
-    ap.add_argument("--piece_vocab_size", type=int, required=True,
-                    help="piece tokenizer 的 vocab 大小(BERT vocab 会是此值+1,末位给 <mask>)")
-    ap.add_argument("--pad_token_id", type=int, default=0,
-                    help="piece 里 <pad> 的 id(BERT config 用)")
-    ap.add_argument("--hidden_size", type=int, default=768)
-    ap.add_argument("--num_layers", type=int, default=12)
-    ap.add_argument("--num_heads", type=int, default=12)
-    ap.add_argument("--intermediate_size", type=int, default=3072)
-    ap.add_argument("--max_position", type=int, default=1024)
+    ap.add_argument("--size", choices=list(SIZE_CFG.keys()), default="base")
+    ap.add_argument("--max_position", type=int, default=512)
+    ap.add_argument("--pad_token_id", type=int, default=16259,
+                    help="piece tokenizer 里 <pad> 的 id(默认对 sp_char_v1)")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
-    mask_token_id = args.piece_vocab_size       # 新 mask 占末位
-    total_vocab = args.piece_vocab_size + 1     # piece + 1 mask
+    # 读 piece tokenizer 拿 vocab_size
+    import piece_tokenizer as pt
+    tok = pt.Tokenizer()
+    tok.load(args.piece_model, cn_dict="no")
+    piece_vocab = tok.vocab_size()
+    mask_token_id = piece_vocab          # BERT vocab 末位
+    total_vocab = piece_vocab + 1
 
-    os.makedirs(args.output_dir, exist_ok=True)
-
+    cfg = SIZE_CFG[args.size]
     config = BertConfig(
         vocab_size=total_vocab,
-        hidden_size=args.hidden_size,
-        num_hidden_layers=args.num_layers,
-        num_attention_heads=args.num_heads,
-        intermediate_size=args.intermediate_size,
+        hidden_size=cfg["hidden_size"],
+        num_hidden_layers=cfg["num_layers"],
+        num_attention_heads=cfg["num_heads"],
+        intermediate_size=cfg["intermediate_size"],
         hidden_act="gelu",
         hidden_dropout_prob=0.1,
         attention_probs_dropout_prob=0.1,
         max_position_embeddings=args.max_position,
-        type_vocab_size=1,             # MLM only,no NSP
+        type_vocab_size=1,
         initializer_range=0.02,
         layer_norm_eps=1e-12,
         pad_token_id=args.pad_token_id,
@@ -61,29 +62,23 @@ def main():
     model.init_weights()
 
     total = sum(p.numel() for p in model.parameters())
-    print(f"BERT init:")
-    print(f"  vocab_size: {total_vocab} (piece {args.piece_vocab_size} + 1 mask at id {mask_token_id})")
-    print(f"  hidden: {config.hidden_size}, layers: {config.num_hidden_layers}, heads: {config.num_attention_heads}")
-    print(f"  max_position: {config.max_position_embeddings}")
-    print(f"  total params: {total/1e6:.1f}M")
-    print(f"  embed: {model.bert.embeddings.word_embeddings.weight.numel()/1e6:.1f}M")
+    embed = model.bert.embeddings.word_embeddings.weight.numel()
+    transformer = total - embed - (config.hidden_size if model.cls.predictions.bias is not None else 0)
+    print(f"\nBERT-{args.size} init:")
+    print(f"  piece vocab:   {piece_vocab}")
+    print(f"  BERT vocab:    {total_vocab}  (+1 for [MASK] at id {mask_token_id})")
+    print(f"  hidden/layers/heads/ffn: {cfg['hidden_size']} / {cfg['num_layers']} / "
+          f"{cfg['num_heads']} / {cfg['intermediate_size']}")
+    print(f"  max_position:  {args.max_position}")
+    print(f"  pad_token_id:  {args.pad_token_id}")
+    print(f"  total params:  {total/1e6:.1f}M (embed {embed/1e6:.1f}M)")
 
+    os.makedirs(args.output_dir, exist_ok=True)
     model.save_pretrained(args.output_dir, safe_serialization=True)
-    print(f"\nSaved to {args.output_dir}/")
-
-    # 拷贝 piece tokenizer artifacts
-    for f in ["piece.model", "dict.txt", "token_mapping.json",
-              "special_tokens_map.json", "tokenizer_config.json"]:
-        src = os.path.join(args.piece_dir, f)
-        if os.path.exists(src):
-            shutil.copy2(src, os.path.join(args.output_dir, f))
-            print(f"  copied {f}")
-        else:
-            print(f"  WARN: {f} not in {args.piece_dir}")
-
+    shutil.copy2(args.piece_model, os.path.join(args.output_dir, "piece.model"))
     with open(os.path.join(args.output_dir, "mask_token_id.txt"), "w") as f:
         f.write(str(mask_token_id))
-    print(f"\nmask_token_id = {mask_token_id} (recorded in mask_token_id.txt)")
+    print(f"\nSaved to {args.output_dir}/")
 
 
 if __name__ == "__main__":

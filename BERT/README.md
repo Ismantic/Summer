@@ -1,93 +1,128 @@
-# BERT-base MLM Pretraining (POC)
+# Char-level RoBERTa-style MLM(零外部依赖)
 
-Encoder-only BERT-base from-scratch 预训练的最小实现,独立目录可移植到任何
-新仓库,不依赖外部代码。
+中文字级 BERT-base MLM 预训。**纯字级输入,无 piece BPE / 无 LTP / 无同义词词典 / 无 NSP / 无 SOP / 无 WWM**,完全可移植可独立成 repo。
+
+最终目标:训出来的 backbone 作为 **CWS teacher** 的底座(后接 multi-criteria CWS fine-tune + silver labeling + Wapiti CRF 部署模型)。
 
 ## 架构
 
-- BERT-base:12 layers / 768 hidden / 12 heads / 3072 FFN
-- Vocab:`piece_vocab_size + 1`(末位预留 `<mask>` id)
-- max_position:1024(可调)
-- MLM only,无 NSP
-
-参数估算:vocab 81903 + 标准 BERT-base = **~149M**(embed 62.9M + transformer 86.5M)。
+- **BERT-base**(可调):12 layers / 768 hidden / 12 heads / 3072 FFN
+- **Vocab**:字级(扫训练语料构建,常见 5 个 specials + 频次 >= N 的字 ≈ 7500-8000)
+- **max_position**:512(适合 CWS 句级输入)
+- **预训目标**:纯 MLM
+  - 15% 单字 mask(80% [MASK] / 10% random / 10% unchanged)
+  - 动态 mask(每 forward 重新采样,RoBERTa-style)
+  - 无 NSP,`type_vocab_size=1`
+- **参数估算**:vocab 7500 时约 **107M**(embed 5.8M + transformer 86.5M + 内部 modules)
 
 ## 外部依赖
-
-只依赖 PyTorch + transformers + 一个 piece tokenizer 目录(含 `piece.model`,
-可选 `dict.txt` for CN 分词)。无需 lm-eval / vllm。
 
 ```
 pip install torch transformers
 ```
 
-## 三步流程
+**仅此**。无 LTP / 无 Synonyms / 无 piece_tokenizer / 无 lm-eval / 无 vllm。
 
-### 1. 构建 init 模型(随机权重)
+## 四步流程
+
+### 1. 构建字级 vocab
+
+```bash
+python build_char_vocab.py \
+    --corpus /path/to/chinese_corpus.txt \
+    --output vocab.txt \
+    --min_freq 10
+```
+
+输出 `vocab.txt`,每行一个字符,id = 行号。前 5 行固定是 specials:
+```
+[PAD]    id=0
+[UNK]    id=1
+[CLS]    id=2
+[SEP]    id=3
+[MASK]   id=4
+的        id=5
+一        id=6
+...
+```
+
+`--min_freq 10` 控制 vocab 大小:21GB 中文 corpus 用 10 大约得到 7500 字,覆盖率 99.95%+。
+
+### 2. 数据编码(char → id)
+
+```bash
+python encode_char_data.py \
+    --corpus /path/to/chinese_corpus.txt \
+    --vocab vocab.txt \
+    --output train.pt \
+    --seq_len 512 \
+    --total_tokens 1000000000
+```
+
+输出 `[N, 512]` int32 PyTorch tensor,保存为 `.pt`。1B 字约 2GB 文件。
+
+### 3. 构建 init 模型(随机权重)
 
 ```bash
 python build_bert_init.py \
-    --piece_dir /path/to/piece_tokenizer_dir \
-    --output_dir ./bert_init \
-    --piece_vocab_size 81903
+    --vocab vocab.txt \
+    --output_dir ./bert_init
 ```
 
-`piece_dir` 期望提供:
-- `piece.model`(必)— C++ PieceTokenizer 训练产物
-- `dict.txt`(可选)— CN 分词字典
-- `token_mapping.json`(可选)— `{"pad_id": ..., "bos_id": ..., ...}`
+输出目录含 `config.json` + `model.safetensors` + `vocab.txt` + `mask_token_id.txt`。
 
-build 脚本会:
-1. 创建 BertForMaskedLM(`piece_vocab_size + 1` 个 embedding)
-2. Qwen3-style 随机 init(`std=0.02`)
-3. 拷 piece 文件到 `bert_init/`
-4. 写 `mask_token_id.txt`(`= piece_vocab_size`)
-
-### 2. 训练数据
-
-需要外部预切好的 `[N, seq_len]` int32 / int64 PyTorch tensor,通过 `torch.save`
-保存为 `.pt` 文件。每个 chunk 内 token id 必须在 `[0, piece_vocab_size)` 范围
-(不会出现 mask_token_id,因为那是训练时 collator 临时插入的)。
-
-### 3. 启动训练
+### 4. 启动训练
 
 ```bash
-bash run_bert_train.sh ./bert_init /path/to/train.pt ./bert_train_ckpt
+bash run_bert_train.sh ./bert_init ./train.pt ./bert_train_ckpt
 ```
 
-或直接调用 train 脚本:
+或直接调用:
 
 ```bash
 python train_bert_mlm.py \
     --model_path ./bert_init \
-    --train_data /path/to/train.pt \
+    --train_data ./train.pt \
     --output_dir ./bert_train_ckpt \
-    --max_seq_length 1024 \
-    --batch_size 16 \
-    --gradient_accumulation_steps 8 \
+    --max_seq_length 512 \
+    --batch_size 32 --gradient_accumulation_steps 8 \
     --gradient_checkpointing --compile \
-    --max_steps 8000 --warmup_steps 500 \
-    --lr 1e-4 --mlm_prob 0.15 \
+    --max_steps 8000 --warmup_steps 1000 \
+    --lr 1e-4 --min_lr_ratio 0.1 \
+    --mlm_prob 0.15 \
     --save_steps 2000
 ```
 
-## MLM 实现细节
+## 时间预算(单卡 4090)
 
-`train_bert_mlm.py:mlm_mask_batch` 实现原始 BERT mask policy:
-- 15% 位置选中(避开 `<pad>`)
-- 其中 80% → `<mask>` token id(末位新增)
-- 10% → 随机 token
-- 10% → 不变
-- 标签:未选中位置设 `-100`(CE loss 忽略)
+| 数据量 | 步数 | 时长 |
+|---|---|---|
+| 1B 字 | 8,000 | ~15-20h |
+| 2B 字 | 16,000 | ~30-40h |
+| 5B 字 | 40,000 | ~3-5 天 |
+
+eff_bs = 32 × 8 × 512 = 131,072 字 / step。
+
+## 跟下游 CWS 的关系
+
+预训完成后,**`bert_train_ckpt` 就是通用 char backbone**,可以:
+
+1. 接 4-类 CRF head 做 **CWS**(BIES 标注 + multi-criteria 联合训 → F1 ~96.5-97%)
+2. 接 NER head 做命名实体
+3. 接其它字级序列标注任务
+
+CWS / silver labeling / Wapiti 部署的代码以后会加进本目录(独立可移植)。
 
 ## 文件清单
 
 ```
 BERT/
-├── build_bert_init.py   # 随机 init Bert + 拷 piece tokenizer
-├── train_bert_mlm.py    # MLM 训练主循环
-├── run_bert_train.sh    # 8000 步 1B token POC 入口
-└── README.md            # 本文件
+├── build_char_vocab.py    # 扫语料 → vocab.txt
+├── encode_char_data.py    # corpus + vocab → [N, seq_len].pt
+├── build_bert_init.py     # vocab.txt → 随机权重 BertForMaskedLM
+├── train_bert_mlm.py      # MLM 训练主循环(纯 MLM,动态 mask)
+├── run_bert_train.sh      # 入口:8000 步 ≈ 1B 字 POC
+└── README.md              # 本文件
 ```
 
-无其他依赖,可以整目录搬到任意位置。
+整目录无任何 hard-coded 外部路径,可直接整体搬走。

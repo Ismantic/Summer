@@ -1,6 +1,13 @@
-"""BERT MLM pretrain — 简化版,encoder-only,无 NSP。
+"""Char-level RoBERTa-style MLM pretrain — encoder-only,无 NSP/SOP/WWM。
 
-复用 v18 数据(input_ids tensor [N, seqlen]),在线做 MLM masking(15%)。
+输入数据格式:[N, seqlen] int32/int64 tensor(`encode_char_data.py` 输出),
+每个 chunk 内 token id 必须在 vocab 范围内。
+
+实现细节:
+- 动态 mask(每 forward 随机采样,RoBERTa-style,而非预先固定 mask)
+- 标准 BERT MLM 策略:15% 位置选中,其中 80% → [MASK] / 10% → random / 10% unchanged
+- pad_token_id 从模型 config 读,不 hardcode
+- mask_token_id 从 model_path/mask_token_id.txt 读(build_bert_init.py 写入)
 """
 import argparse, os, json, time, math
 import torch
@@ -10,34 +17,40 @@ from transformers import BertForMaskedLM, BertConfig, get_cosine_schedule_with_w
 
 
 class IntTensorDataset(Dataset):
+    """保留 int32 节省内存(5B 字 int32 = 19GB vs int64 = 38GB),单 chunk 取出时再转 long。"""
     def __init__(self, pt_path, max_chunks=None):
         data = torch.load(pt_path, map_location="cpu", weights_only=True)
         if max_chunks is not None and data.shape[0] > max_chunks:
             data = data[:max_chunks]
-        self.data = data.to(torch.long)  # int32 → long for embedding
-        print(f"Loaded {data.shape[0]:,} chunks × {data.shape[1]} from {pt_path}")
+        self.data = data  # 保留 int32
+        print(f"Loaded {data.shape[0]:,} chunks × {data.shape[1]} from {pt_path} "
+              f"({data.numel()*data.element_size()/1e9:.1f} GB, dtype={data.dtype})")
     def __len__(self): return self.data.shape[0]
-    def __getitem__(self, i): return self.data[i]
+    def __getitem__(self, i): return self.data[i].to(torch.long)  # 单 chunk 转 long
 
 
-def mlm_mask_batch(input_ids, mask_token_id, vocab_size, prob=0.15, pad_id=81899):
-    """In-place MLM masking — 15% selected,其中 80% → mask,10% → random,10% unchanged。"""
+def mlm_mask_batch(input_ids, mask_token_id, vocab_size, prob=0.15, pad_id=0):
+    """In-place MLM masking — 15% selected,其中 80% → mask,10% → random,10% unchanged。
+    所有中间 tensor 都跟 input_ids 同 device(CPU 或 CUDA)。
+    """
+    dev = input_ids.device
     input_ids = input_ids.clone()
     labels = input_ids.clone()
-    # 不 mask 已经是 pad 的位置(数据里其实不会有)
     not_pad = input_ids != pad_id
-    probability_matrix = torch.full(labels.shape, prob)
+    probability_matrix = torch.full(labels.shape, prob, device=dev)
     masked_indices = torch.bernoulli(probability_matrix).bool() & not_pad
-    labels[~masked_indices] = -100  # 只对 masked 位置算 loss
+    labels[~masked_indices] = -100
 
     # 80% → [MASK]
-    replace_mask = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
+    replace_mask = torch.bernoulli(
+        torch.full(labels.shape, 0.8, device=dev)).bool() & masked_indices
     input_ids[replace_mask] = mask_token_id
     # 10% → random token
-    replace_rand = torch.bernoulli(torch.full(labels.shape, 0.5)).bool() & masked_indices & ~replace_mask
-    random_words = torch.randint(0, vocab_size, labels.shape, dtype=input_ids.dtype)
+    replace_rand = torch.bernoulli(
+        torch.full(labels.shape, 0.5, device=dev)).bool() & masked_indices & ~replace_mask
+    random_words = torch.randint(0, vocab_size, labels.shape,
+                                 dtype=input_ids.dtype, device=dev)
     input_ids[replace_rand] = random_words[replace_rand]
-    # 剩 10% unchanged
     return input_ids, labels
 
 
@@ -90,7 +103,7 @@ def main():
     ds = IntTensorDataset(args.train_data, args.max_chunks)
     print(f"Dataset: {len(ds):,} chunks × {ds.data.shape[1]} = {ds.data.numel():,} tokens")
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
-                        num_workers=2, pin_memory=True, drop_last=True)
+                        num_workers=0, pin_memory=True, drop_last=True)
     steps_per_epoch = len(loader) // args.gradient_accumulation_steps
     print(f"steps/epoch: {steps_per_epoch}, max_steps: {args.max_steps}")
 
@@ -128,7 +141,8 @@ def main():
                 mask_pos = labels != -100
                 correct_acc += ((preds == labels) & mask_pos).sum().item()
                 n_masked_acc += mask_pos.sum().item()
-            loss_acc += loss.item() * args.gradient_accumulation_steps
+            # loss.item() 已经除过 grad_accum,直接累(每 forward 累一次)
+            loss_acc += loss.item()
             accum += 1
             if accum >= args.gradient_accumulation_steps:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
@@ -144,7 +158,8 @@ def main():
                 if step % args.logging_steps == 0:
                     el = time.time() - t0
                     cur_lr = optim.param_groups[0]["lr"]
-                    avg_loss = loss_acc / args.logging_steps
+                    # loss_acc 累了 args.logging_steps × grad_accum 个 forward
+                    avg_loss = loss_acc / (args.logging_steps * args.gradient_accumulation_steps)
                     acc = correct_acc / max(1, n_masked_acc)
                     print(f"step {step}/{args.max_steps} | loss {avg_loss:.4f} | "
                           f"mlm_acc {acc:.4f} | lr [{cur_lr:.6f}] | {el:.1f}s", flush=True)

@@ -225,6 +225,9 @@ checkpoints/
 experiments.tsv
 corpus_v17/
 tokenizer_corpus/
-BERT/bert_init/
-BERT/bert_train_ckpt/
+BERT/bert_init*/
+BERT/bert_train*/
+BERT/piece_char*/
+BERT/sp_char*/
+BERT/train_*.pt
 BERT/*.log
