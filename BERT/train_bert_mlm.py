@@ -9,7 +9,7 @@
 - pad_token_id 从模型 config 读,不 hardcode
 - mask_token_id 从 model_path/mask_token_id.txt 读(build_bert_init.py 写入)
 """
-import argparse, os, json, time, math
+import argparse, os, sys, json, time, math
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
@@ -75,13 +75,21 @@ def main():
     p.add_argument("--logging_steps", type=int, default=50)
     p.add_argument("--gradient_checkpointing", action="store_true")
     p.add_argument("--compile", action="store_true")
+    p.add_argument("--use_muon", action="store_true",
+                   help="2D 矩阵走 Muon,embed/head/bias 走 AdamW")
+    p.add_argument("--use_aurora", action="store_true",
+                   help="Aurora 变体(leverage-uniform polar),隐含 use_muon")
+    p.add_argument("--muon_lr", type=float, default=0.02,
+                   help="Muon/Aurora 2D 矩阵的 lr(常用 0.02)")
+    p.add_argument("--muon_momentum", type=float, default=0.95)
+    p.add_argument("--moonshot_scaling", action="store_true",
+                   help="Moonshot per-param lr scaling(默认关)")
     args = p.parse_args()
 
     device = "cuda"
     os.makedirs(args.output_dir, exist_ok=True)
 
     # dump args 到 train_args.json,避免事后只能从 lr 轨迹反推
-    import json, sys
     with open(os.path.join(args.output_dir, "train_args.json"), "w") as f:
         json.dump({"args": vars(args), "cmdline": sys.argv}, f, indent=2, ensure_ascii=False)
 
@@ -112,18 +120,47 @@ def main():
     steps_per_epoch = len(loader) // args.gradient_accumulation_steps
     print(f"steps/epoch: {steps_per_epoch}, max_steps: {args.max_steps}")
 
-    # 优化器 + scheduler
-    optim = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                              betas=(0.9, 0.999), eps=1e-8,
-                              weight_decay=args.weight_decay)
+    # 优化器:Muon/Aurora(2D 矩阵)+ AdamW(embed/head/bias)or 全 AdamW
+    use_muon = args.use_muon or args.use_aurora
+    if use_muon:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from muon import SingleDeviceMuonWithAuxAdam
+        muon_params, adam_params = [], []
+        for name, param in model.named_parameters():
+            if not param.requires_grad: continue
+            if param.ndim >= 2 and "embed" not in name and "lm_head" not in name:
+                muon_params.append(param)
+            else:
+                adam_params.append(param)
+        rule = "Aurora" if args.use_aurora else "Muon"
+        if args.moonshot_scaling: rule += "+MoonshotLR"
+        print(f"{rule} params: {sum(p.numel() for p in muon_params):,} | "
+              f"AdamW params: {sum(p.numel() for p in adam_params):,}")
+        param_groups = [
+            dict(params=muon_params, lr=args.muon_lr, momentum=args.muon_momentum,
+                 weight_decay=args.weight_decay, use_muon=True),
+            dict(params=adam_params, lr=args.lr, betas=(0.9, 0.95), eps=1e-10,
+                 weight_decay=args.weight_decay, use_muon=False),
+        ]
+        update_fn = None
+        if args.use_aurora:
+            from aurora import aurora_update
+            update_fn = aurora_update
+        optim = SingleDeviceMuonWithAuxAdam(param_groups, update_fn=update_fn,
+                                             moonshot_scaling=args.moonshot_scaling)
+    else:
+        optim = torch.optim.AdamW(model.parameters(), lr=args.lr,
+                                  betas=(0.9, 0.999), eps=1e-8,
+                                  weight_decay=args.weight_decay)
     scheduler = get_cosine_schedule_with_warmup(
         optim,
         num_warmup_steps=args.warmup_steps,
         num_training_steps=args.max_steps,
         num_cycles=0.5,
     )
-    # 手动设 min_lr_ratio 兼容
-    min_lr = args.lr * args.min_lr_ratio
+    # per-group min_lr(initial_lr × min_lr_ratio,muon/adam 各有各的 floor)
+    initial_lrs = [g["lr"] for g in optim.param_groups]
+    min_lrs = [lr * args.min_lr_ratio for lr in initial_lrs]
 
     step = 0
     accum = 0
@@ -153,21 +190,21 @@ def main():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 optim.step()
                 scheduler.step()
-                # clip min_lr
-                for g in optim.param_groups:
-                    if g["lr"] < min_lr: g["lr"] = min_lr
+                # per-group min_lr clip
+                for g, floor in zip(optim.param_groups, min_lrs):
+                    if g["lr"] < floor: g["lr"] = floor
                 optim.zero_grad(set_to_none=True)
                 step += 1
                 accum = 0
 
                 if step % args.logging_steps == 0:
                     el = time.time() - t0
-                    cur_lr = optim.param_groups[0]["lr"]
+                    lrs = [f"{g['lr']:.6f}" for g in optim.param_groups]
                     # loss_acc 累了 args.logging_steps × grad_accum 个 forward
                     avg_loss = loss_acc / (args.logging_steps * args.gradient_accumulation_steps)
                     acc = correct_acc / max(1, n_masked_acc)
                     print(f"step {step}/{args.max_steps} | loss {avg_loss:.4f} | "
-                          f"mlm_acc {acc:.4f} | lr [{cur_lr:.6f}] | {el:.1f}s", flush=True)
+                          f"mlm_acc {acc:.4f} | lr [{', '.join(lrs)}] | {el:.1f}s", flush=True)
                     loss_acc = 0.0
                     correct_acc = 0
                     n_masked_acc = 0
