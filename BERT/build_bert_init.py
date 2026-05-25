@@ -27,8 +27,8 @@ def main():
     ap.add_argument("--output_dir", default="bert_init")
     ap.add_argument("--size", choices=list(SIZE_CFG.keys()), default="base")
     ap.add_argument("--max_position", type=int, default=512)
-    ap.add_argument("--pad_token_id", type=int, default=16259,
-                    help="piece tokenizer 里 <pad> 的 id(默认对 sp_char_v1)")
+    ap.add_argument("--pad_token_id", type=int, default=-1,
+                    help="piece tokenizer 里 <pad> 的 id(-1 = 自动从 piece 读)")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -39,6 +39,13 @@ def main():
     piece_vocab = tok.vocab_size()
     mask_token_id = piece_vocab          # BERT vocab 末位
     total_vocab = piece_vocab + 1
+
+    # pad_token_id: -1 = 自动从 piece <pad> 读
+    pad_id = args.pad_token_id
+    if pad_id < 0:
+        pad_id = tok.piece_to_id("<pad>")
+        if pad_id <= 0 or pad_id >= piece_vocab:
+            raise RuntimeError(f"<pad> not found in piece vocab (got id {pad_id})")
 
     cfg = SIZE_CFG[args.size]
     config = BertConfig(
@@ -54,7 +61,7 @@ def main():
         type_vocab_size=1,
         initializer_range=0.02,
         layer_norm_eps=1e-12,
-        pad_token_id=args.pad_token_id,
+        pad_token_id=pad_id,
     )
 
     torch.manual_seed(args.seed)
@@ -70,7 +77,7 @@ def main():
     print(f"  hidden/layers/heads/ffn: {cfg['hidden_size']} / {cfg['num_layers']} / "
           f"{cfg['num_heads']} / {cfg['intermediate_size']}")
     print(f"  max_position:  {args.max_position}")
-    print(f"  pad_token_id:  {args.pad_token_id}")
+    print(f"  pad_token_id:  {pad_id}")
     print(f"  total params:  {total/1e6:.1f}M (embed {embed/1e6:.1f}M)")
 
     os.makedirs(args.output_dir, exist_ok=True)
