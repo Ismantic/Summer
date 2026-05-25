@@ -80,6 +80,11 @@ def main():
     device = "cuda"
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # dump args 到 train_args.json,避免事后只能从 lr 轨迹反推
+    import json, sys
+    with open(os.path.join(args.output_dir, "train_args.json"), "w") as f:
+        json.dump({"args": vars(args), "cmdline": sys.argv}, f, indent=2, ensure_ascii=False)
+
     # 读 mask_token_id
     with open(os.path.join(args.model_path, "mask_token_id.txt")) as f:
         mask_token_id = int(f.read().strip())
