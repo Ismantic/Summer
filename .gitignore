@@ -230,4 +230,6 @@ BERT/bert_train*/
 BERT/piece_char*/
 BERT/sp_char*/
 BERT/train_*.pt
+BERT/train_*.pt.meta
 BERT/*.log
+BERT/NLP_BERT_CRF/

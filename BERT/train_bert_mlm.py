@@ -10,6 +10,7 @@
 - mask_token_id 从 model_path/mask_token_id.txt 读(build_bert_init.py 写入)
 """
 import argparse, os, sys, json, time, math
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
@@ -17,16 +18,31 @@ from transformers import BertForMaskedLM, BertConfig, get_cosine_schedule_with_w
 
 
 class IntTensorDataset(Dataset):
-    """保留 int32 节省内存(5B 字 int32 = 19GB vs int64 = 38GB),单 chunk 取出时再转 long。"""
+    """保留 int32 节省内存。
+    - 若 pt_path + .meta 存在:用 numpy memmap 读 raw int32 binary(零 RAM,OS 按需 page in,适合 8B+ tokens)
+    - 否则用 torch.load 读 .pt(向后兼容 v1/v3 老格式)
+    单 chunk 取出时再转 long。
+    """
     def __init__(self, pt_path, max_chunks=None):
-        data = torch.load(pt_path, map_location="cpu", weights_only=True)
+        meta_path = pt_path + ".meta"
+        if os.path.exists(meta_path):
+            import json
+            with open(meta_path) as f:
+                meta = json.load(f)
+            arr = np.memmap(pt_path, dtype=np.dtype(meta["dtype"]), mode="r",
+                            shape=tuple(meta["shape"]))
+            data = torch.from_numpy(arr)
+            mode = "memmap"
+        else:
+            data = torch.load(pt_path, map_location="cpu", weights_only=True)
+            mode = "torch.load"
         if max_chunks is not None and data.shape[0] > max_chunks:
             data = data[:max_chunks]
         self.data = data  # 保留 int32
         print(f"Loaded {data.shape[0]:,} chunks × {data.shape[1]} from {pt_path} "
-              f"({data.numel()*data.element_size()/1e9:.1f} GB, dtype={data.dtype})")
+              f"({data.numel()*data.element_size()/1e9:.1f} GB, dtype={data.dtype}, {mode})")
     def __len__(self): return self.data.shape[0]
-    def __getitem__(self, i): return self.data[i].to(torch.long)  # 单 chunk 转 long
+    def __getitem__(self, i): return self.data[i].to(torch.long)
 
 
 def mlm_mask_batch(input_ids, mask_token_id, vocab_size, prob=0.15, pad_id=0):

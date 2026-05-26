@@ -14,10 +14,38 @@ inference 不需要传 cn-dict(词表里没有中文 N-gram piece,BPE 也 merge 
       --output /path/to/train.pt \
       --seq_len 512 --total_tokens 5000000000
 """
-import argparse, os, time
+import argparse, os, random, time
 import numpy as np
 import torch
 import multiprocessing as mp
+
+
+def iter_shuffled_lines(corpus_path, seed=42):
+    """先 scan corpus 收集每行 byte offset → shuffle → seek-read 按 shuffled 顺序流式 yield。
+
+    内存:offsets 列表 (64M lines × 8 byte = ~512 MB),不读 line 内容。
+    适合 corpus 远大于内存的情况(避免读全 file 进 list)。
+    """
+    print("  [shuffle] scanning line offsets...", flush=True)
+    t0 = time.time()
+    offsets = []
+    with open(corpus_path, "rb") as f:
+        pos = 0
+        while True:
+            line = f.readline()
+            if not line: break
+            offsets.append(pos)
+            pos += len(line)
+    print(f"  [shuffle] {len(offsets):,} lines in {time.time()-t0:.0f}s, "
+          f"shuffling (seed={seed})...", flush=True)
+    random.Random(seed).shuffle(offsets)
+    print(f"  [shuffle] done shuffling, streaming in random order", flush=True)
+
+    with open(corpus_path, "rb") as f:
+        for off in offsets:
+            f.seek(off)
+            line = f.readline()
+            yield line.decode("utf-8", errors="replace")
 
 
 def worker(args):
@@ -44,6 +72,9 @@ def main():
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--batch_docs", type=int, default=10000,
                     help="每批送给 worker 的 doc 数")
+    ap.add_argument("--shuffle_docs", action="store_true",
+                    help="按行随机抽样(避免只覆盖 corpus 前缀)")
+    ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
     target_chunks = max(1, args.total_tokens // args.seq_len)
@@ -52,7 +83,10 @@ def main():
     print(f"Tokenizer: {args.tokenizer_model}")
     print(f"Workers: {args.num_workers}")
 
-    out = np.empty((target_chunks, args.seq_len), dtype=np.int32)
+    # 用 memmap 直接背靠 disk,避免 32G out array 全部驻 RAM(超 8B token 时会 OOM kill)
+    tmp_path = args.output + ".tmp"
+    out = np.memmap(tmp_path, dtype=np.int32, mode="w+",
+                    shape=(target_chunks, args.seq_len))
     buf, n_filled = [], 0
     t0 = time.time()
     n_docs = 0
@@ -82,35 +116,48 @@ def main():
 
     done = False
     docs_buf = []
-    with open(args.corpus, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                docs_buf.append(line)
-            if len(docs_buf) >= args.batch_docs:
-                # 异步派给 workers
-                sub_batches = split_batches(docs_buf)
-                results = [pool.apply_async(worker, ((sb, args.tokenizer_model),))
-                           for sb in sub_batches]
-                for r, sb in zip(results, sub_batches):
-                    if flush_one(r, len(sb)):
-                        done = True; break
-                docs_buf = []
-                if done: break
-        # 收尾:最后一批
-        if not done and docs_buf:
+    # 选择 line iterator: shuffle = offset-shuffle 随机顺序;否则顺序流式
+    if args.shuffle_docs:
+        line_iter = iter_shuffled_lines(args.corpus, seed=args.seed)
+    else:
+        def _seq_iter():
+            with open(args.corpus, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    yield line
+        line_iter = _seq_iter()
+    for line in line_iter:
+        line = line.strip()
+        if line:
+            docs_buf.append(line)
+        if len(docs_buf) >= args.batch_docs:
             sub_batches = split_batches(docs_buf)
             results = [pool.apply_async(worker, ((sb, args.tokenizer_model),))
                        for sb in sub_batches]
             for r, sb in zip(results, sub_batches):
                 if flush_one(r, len(sb)):
-                    break
+                    done = True; break
+            docs_buf = []
+            if done: break
+    # 收尾:最后一批
+    if not done and docs_buf:
+        sub_batches = split_batches(docs_buf)
+        results = [pool.apply_async(worker, ((sb, args.tokenizer_model),))
+                   for sb in sub_batches]
+        for r, sb in zip(results, sub_batches):
+            if flush_one(r, len(sb)):
+                break
 
     pool.close(); pool.join()
 
-    out = out[:n_filled]
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-    torch.save(torch.from_numpy(out), args.output)
+    # flush memmap + truncate 到实际 n_filled + 写 .meta sidecar(用于 train load)
+    out.flush()
+    del out
+    actual_bytes = n_filled * args.seq_len * 4  # int32 = 4 byte
+    os.truncate(tmp_path, actual_bytes)
+    os.rename(tmp_path, args.output)
+    import json
+    with open(args.output + ".meta", "w") as f:
+        json.dump({"shape": [n_filled, args.seq_len], "dtype": "int32"}, f)
     print(f"\nDone in {time.time()-t0:.0f}s")
     print(f"  {n_docs:,} docs scanned")
     print(f"  saved {n_filled:,} × {args.seq_len} = {n_filled*args.seq_len:,} tokens → {args.output}")
