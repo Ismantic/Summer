@@ -232,4 +232,13 @@ BERT/sp_char*/
 BERT/train_*.pt
 BERT/train_*.pt.meta
 BERT/*.log
-BERT/NLP_BERT_CRF/
+# NLP_BERT_CRF: 只 ignore 数据/产物,代码进 repo
+BERT/NLP_BERT_CRF/data/
+BERT/NLP_BERT_CRF/output_*/
+BERT/NLP_BERT_CRF/logs/
+BERT/NLP_BERT_CRF/macbert-large/
+BERT/NLP_BERT_CRF/roberta-wwm-ext/
+BERT/NLP_BERT_CRF/__pycache__/
+BERT/NLP_BERT_CRF/*.log
+BERT/NLP_BERT_CRF/*.pt
+BERT/NLP_BERT_CRF/eval_results/
