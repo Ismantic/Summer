@@ -13,7 +13,7 @@ from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data import bies_to_words
 from data_pos_ner import build_pos_vocab, ID2NER, NER_TAGS
-from data_mt import MTDataset, MTCollator
+from data_mt import MTDataset, MTCollator, DistillMTDataset, ConcatMTDataset
 from model_mt import BertMT
 
 
@@ -130,6 +130,10 @@ def main():
     ap.add_argument("--eval_dev_limit", type=int, default=2000)
     ap.add_argument("--fgm", action="store_true")
     ap.add_argument("--fgm_eps", type=float, default=1.0)
+    ap.add_argument("--distill_jsonl", default=None,
+                    help="LTP-distill MT jsonl(单文件 text/words/pos/entities)")
+    ap.add_argument("--distill_limit", type=int, default=0,
+                    help="限 distill items 数(0=全用)")
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -150,10 +154,18 @@ def main():
         tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
 
     # Datasets
-    print("Loading train...")
+    print("Loading train(PD strong)...")
     train_ds = MTDataset(args.cws_train, args.pos_train, args.ner_train,
                          pos2id, max_chars=args.max_chars)
-    print(f"  {len(train_ds)} samples")
+    print(f"  PD: {len(train_ds)} samples")
+    if args.distill_jsonl:
+        print(f"Loading distill: {args.distill_jsonl}")
+        d_ds = DistillMTDataset(args.distill_jsonl, pos2id, max_chars=args.max_chars)
+        if args.distill_limit and args.distill_limit < len(d_ds):
+            d_ds.items = d_ds.items[:args.distill_limit]
+        print(f"  distill: {len(d_ds)} samples")
+        train_ds = ConcatMTDataset(train_ds, d_ds)
+        print(f"  combined: {len(train_ds)} samples")
     print("Loading dev...")
     full_dev_ds = MTDataset(args.cws_dev, args.pos_dev, args.ner_dev,
                             pos2id, max_chars=args.max_chars)

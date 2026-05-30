@@ -60,15 +60,22 @@ class MTDataset(Dataset):
                             pos_tags[idx_c] = pid
                         idx_c += 1
             # NER: LTP-aligned BIES,弃 MISC/I/L
+            # 兼容旧 type (PER/LOC/ORG) 和新 type (Nh/Ns/Ni)
             ner_tags = [NER_TAGS["O"]] * len(chars)
             for ent in ner_obj.get("entities", []):
-                t = ent.get("type", "MISC")
-                if t not in PD2LTP_NER: continue
-                s, e = ent["start"], ent["end"]
-                bies = entity_to_bies(s, e, t, len(chars))
-                if not bies: continue
-                for pos, tid in bies:
-                    ner_tags[pos] = tid
+                t = ent.get("type", "")
+                if t in PD2LTP_NER: t = PD2LTP_NER[t]
+                if t not in ("Nh", "Ns", "Ni"): continue
+                s, e = ent["start"], min(ent["end"], len(chars))
+                length = e - s
+                if s >= len(chars) or length <= 0: continue
+                if length == 1:
+                    ner_tags[s] = NER_TAGS[f"S-{t}"]
+                else:
+                    ner_tags[s] = NER_TAGS[f"B-{t}"]
+                    for j in range(s + 1, e - 1):
+                        ner_tags[j] = NER_TAGS[f"I-{t}"]
+                    ner_tags[e - 1] = NER_TAGS[f"E-{t}"]
             if len(chars) > max_chars:
                 chars = chars[:max_chars]
                 cws_tags = cws_tags[:max_chars]
@@ -84,6 +91,68 @@ class MTDataset(Dataset):
                 "ner_tags": ner_tags,
             })
 
+    def __len__(self): return len(self.items)
+    def __getitem__(self, idx): return self.items[idx]
+
+
+class DistillMTDataset(Dataset):
+    """LTP-distilled 单 jsonl(text/words/pos/entities)→ MT items。
+    POS 直接用 LTP tag(不走 PD→LTP 映射),NER type 已是 Nh/Ns/Ni。
+    """
+    def __init__(self, jsonl_path, pos2id=None, max_chars=254):
+        if pos2id is None: pos2id = LTP_POS2ID
+        self.items = []
+        with open(jsonl_path, encoding="utf8") as f:
+            for line in f:
+                obj = json.loads(line)
+                words = obj.get("words", [])
+                pos = obj.get("pos", [])
+                if not words or len(pos) != len(words): continue
+                chars, cws_tags = words_to_cws_bies(words)
+                pos_tags = [-100] * len(chars)
+                idx_c = 0
+                for w, p in zip(words, pos):
+                    pid = pos2id.get(p, pos2id.get('x', 0))
+                    for _ in w:
+                        if idx_c < len(pos_tags): pos_tags[idx_c] = pid
+                        idx_c += 1
+                ner_tags = [NER_TAGS["O"]] * len(chars)
+                for ent in obj.get("entities", []):
+                    t = ent.get("type", "")
+                    if t not in ("Nh", "Ns", "Ni"): continue
+                    s, e = ent["start"], min(ent["end"], len(chars))
+                    length = e - s
+                    if s >= len(chars) or length <= 0: continue
+                    if length == 1:
+                        ner_tags[s] = NER_TAGS[f"S-{t}"]
+                    else:
+                        ner_tags[s] = NER_TAGS[f"B-{t}"]
+                        for j in range(s + 1, e - 1):
+                            ner_tags[j] = NER_TAGS[f"I-{t}"]
+                        ner_tags[e - 1] = NER_TAGS[f"E-{t}"]
+                if len(chars) > max_chars:
+                    chars = chars[:max_chars]
+                    cws_tags = cws_tags[:max_chars]
+                    pos_tags = pos_tags[:max_chars]
+                    ner_tags = ner_tags[:max_chars]
+                    if cws_tags[-1] == CWS_TAG2ID["B"]: cws_tags[-1] = CWS_TAG2ID["S"]
+                    elif cws_tags[-1] == CWS_TAG2ID["I"]: cws_tags[-1] = CWS_TAG2ID["E"]
+                if not chars: continue
+                self.items.append({
+                    "chars": chars, "cws_tags": cws_tags,
+                    "pos_tags": pos_tags, "ner_tags": ner_tags,
+                })
+
+    def __len__(self): return len(self.items)
+    def __getitem__(self, idx): return self.items[idx]
+
+
+class ConcatMTDataset(Dataset):
+    """简单拼接两个 MT dataset(PD strong + LTP distill)。"""
+    def __init__(self, *datasets):
+        self.items = []
+        for d in datasets:
+            self.items.extend(d.items)
     def __len__(self): return len(self.items)
     def __getitem__(self, idx): return self.items[idx]
 

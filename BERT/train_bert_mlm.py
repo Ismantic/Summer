@@ -17,32 +17,43 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from transformers import BertForMaskedLM, BertConfig, get_cosine_schedule_with_warmup
 
 
+def _load_memmap_or_pt(pt_path):
+    meta_path = pt_path + ".meta"
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            meta = json.load(f)
+        arr = np.memmap(pt_path, dtype=np.dtype(meta["dtype"]), mode="r",
+                        shape=tuple(meta["shape"]))
+        return torch.from_numpy(arr), "memmap"
+    return torch.load(pt_path, map_location="cpu", weights_only=True), "torch.load"
+
+
 class IntTensorDataset(Dataset):
-    """保留 int32 节省内存。
-    - 若 pt_path + .meta 存在:用 numpy memmap 读 raw int32 binary(零 RAM,OS 按需 page in,适合 8B+ tokens)
-    - 否则用 torch.load 读 .pt(向后兼容 v1/v3 老格式)
-    单 chunk 取出时再转 long。
+    """保留 int32 节省内存。memmap 优先,torch.load 向后兼容。单 chunk 取出时转 long。
+    若 word_ids_path 提供,getitem 返回 (input_ids, word_ids) tuple,用于 WWM 训练。
     """
-    def __init__(self, pt_path, max_chunks=None):
-        meta_path = pt_path + ".meta"
-        if os.path.exists(meta_path):
-            import json
-            with open(meta_path) as f:
-                meta = json.load(f)
-            arr = np.memmap(pt_path, dtype=np.dtype(meta["dtype"]), mode="r",
-                            shape=tuple(meta["shape"]))
-            data = torch.from_numpy(arr)
-            mode = "memmap"
-        else:
-            data = torch.load(pt_path, map_location="cpu", weights_only=True)
-            mode = "torch.load"
+    def __init__(self, pt_path, max_chunks=None, word_ids_path=None):
+        data, mode = _load_memmap_or_pt(pt_path)
         if max_chunks is not None and data.shape[0] > max_chunks:
             data = data[:max_chunks]
-        self.data = data  # 保留 int32
+        self.data = data
         print(f"Loaded {data.shape[0]:,} chunks × {data.shape[1]} from {pt_path} "
               f"({data.numel()*data.element_size()/1e9:.1f} GB, dtype={data.dtype}, {mode})")
+        self.word_ids = None
+        if word_ids_path is not None:
+            wdata, wmode = _load_memmap_or_pt(word_ids_path)
+            if max_chunks is not None and wdata.shape[0] > max_chunks:
+                wdata = wdata[:max_chunks]
+            assert wdata.shape == data.shape, f"word_ids shape {wdata.shape} != data shape {data.shape}"
+            self.word_ids = wdata
+            print(f"  + word_ids from {word_ids_path} ({wdata.dtype}, {wmode}) → WWM mode")
     def __len__(self): return self.data.shape[0]
-    def __getitem__(self, i): return self.data[i].to(torch.long)
+    def __getitem__(self, i):
+        ids = self.data[i].to(torch.long)
+        if self.word_ids is not None:
+            wids = self.word_ids[i].to(torch.long)
+            return ids, wids
+        return ids
 
 
 def mlm_mask_batch(input_ids, mask_token_id, vocab_size, prob=0.15, pad_id=0):
@@ -70,6 +81,60 @@ def mlm_mask_batch(input_ids, mask_token_id, vocab_size, prob=0.15, pad_id=0):
     return input_ids, labels
 
 
+def mlm_mask_batch_wwm(input_ids, word_ids, mask_token_id, vocab_size,
+                       prob=0.15, pad_id=0):
+    """Whole Word Masking — 按 word_id group,15% 选 word,整 word 一起 80/10/10。
+    word_ids: [B, L] int64,同词共用 id。pad 位置 word_id 任意(被 not_pad mask 掉)。
+    """
+    dev = input_ids.device
+    B, L = input_ids.shape
+    input_ids = input_ids.clone()
+    labels = input_ids.clone()
+    not_pad = input_ids != pad_id
+
+    # 给 word_ids 跨 batch 加 offset(让不同 sample 的同名 word_id 不冲突)
+    max_wid = int(word_ids.max().item()) + 1
+    global_wid = word_ids + torch.arange(B, device=dev, dtype=word_ids.dtype).unsqueeze(1) * max_wid
+    # pad 位置 set 成一个独占值,避免污染 unique
+    SENTINEL = global_wid.max().item() + 1
+    global_wid_for_unique = torch.where(not_pad, global_wid, torch.full_like(global_wid, SENTINEL))
+
+    flat = global_wid_for_unique.flatten()
+    unique_wids, inverse = torch.unique(flat, return_inverse=True)
+    # 找 SENTINEL 在 unique 中的 index,屏蔽
+    sentinel_idx_mask = unique_wids != SENTINEL
+    n_words = int(sentinel_idx_mask.sum().item())
+    if n_words == 0:
+        return input_ids, torch.full_like(labels, -100)
+
+    # 在 valid words 里选 prob 比例
+    valid_word_indices = torch.nonzero(sentinel_idx_mask, as_tuple=False).squeeze(-1)
+    n_to_mask = max(1, int(n_words * prob))
+    perm = torch.randperm(n_words, device=dev)
+    chosen_in_valid = perm[:n_to_mask]
+    chosen_unique_idx = valid_word_indices[chosen_in_valid]
+
+    # per word 决定 80/10/10
+    chosen_flag = torch.zeros(len(unique_wids), dtype=torch.bool, device=dev)
+    chosen_flag[chosen_unique_idx] = True
+    decision = torch.rand(len(unique_wids), device=dev)
+    is_mask_word = chosen_flag & (decision < 0.8)
+    is_rand_word = chosen_flag & (decision >= 0.8) & (decision < 0.9)
+    # else unchanged but labels still kept
+
+    # scatter back to [B, L]
+    chosen_per_pos = chosen_flag[inverse].view(B, L) & not_pad
+    mask_per_pos = is_mask_word[inverse].view(B, L) & not_pad
+    rand_per_pos = is_rand_word[inverse].view(B, L) & not_pad
+
+    labels[~chosen_per_pos] = -100
+    input_ids[mask_per_pos] = mask_token_id
+    rand_tokens = torch.randint(0, vocab_size, input_ids.shape,
+                                dtype=input_ids.dtype, device=dev)
+    input_ids[rand_per_pos] = rand_tokens[rand_per_pos]
+    return input_ids, labels
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model_path", required=True)
@@ -91,6 +156,10 @@ def main():
     p.add_argument("--logging_steps", type=int, default=50)
     p.add_argument("--gradient_checkpointing", action="store_true")
     p.add_argument("--compile", action="store_true")
+    p.add_argument("--wwm", action="store_true",
+                   help="Whole Word Masking(需要 --word_ids_data 配套)")
+    p.add_argument("--word_ids_data", default=None,
+                   help="word_id memmap path(uint16 [N,seq] 同 train_data shape)")
     p.add_argument("--use_muon", action="store_true",
                    help="2D 矩阵走 Muon,embed/head/bias 走 AdamW")
     p.add_argument("--use_aurora", action="store_true",
@@ -129,8 +198,15 @@ def main():
         print("torch.compile enabled")
 
     # 数据
-    ds = IntTensorDataset(args.train_data, args.max_chunks)
-    print(f"Dataset: {len(ds):,} chunks × {ds.data.shape[1]} = {ds.data.numel():,} tokens")
+    if args.wwm:
+        if args.word_ids_data is None:
+            args.word_ids_data = args.train_data + ".wid"
+        assert os.path.exists(args.word_ids_data), \
+            f"--wwm requires word_ids_data at {args.word_ids_data}"
+    ds = IntTensorDataset(args.train_data, args.max_chunks,
+                          word_ids_path=args.word_ids_data if args.wwm else None)
+    print(f"Dataset: {len(ds):,} chunks × {ds.data.shape[1]} = {ds.data.numel():,} tokens"
+          f"{' [WWM]' if args.wwm else ''}")
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
                         num_workers=0, pin_memory=True, drop_last=True)
     steps_per_epoch = len(loader) // args.gradient_accumulation_steps
@@ -168,15 +244,16 @@ def main():
         optim = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   betas=(0.9, 0.999), eps=1e-8,
                                   weight_decay=args.weight_decay)
+    # per-group min_lr 必须在 scheduler 创建前取(scheduler.__init__ 会 set lr=base×lambda(0)=0,
+    # 在 warmup 期间该值是 0,后取就拿到 0 → min_lrs 全为 0 → clip 永远不激活,bug)
+    initial_lrs = [g["lr"] for g in optim.param_groups]
+    min_lrs = [lr * args.min_lr_ratio for lr in initial_lrs]
     scheduler = get_cosine_schedule_with_warmup(
         optim,
         num_warmup_steps=args.warmup_steps,
         num_training_steps=args.max_steps,
         num_cycles=0.5,
     )
-    # per-group min_lr(initial_lr × min_lr_ratio,muon/adam 各有各的 floor)
-    initial_lrs = [g["lr"] for g in optim.param_groups]
-    min_lrs = [lr * args.min_lr_ratio for lr in initial_lrs]
 
     step = 0
     accum = 0
@@ -186,10 +263,19 @@ def main():
     n_masked_acc = 0
     model.train()
     while step < args.max_steps:
-        for input_ids in loader:
-            input_ids = input_ids.to(device, non_blocking=True)
-            masked_ids, labels = mlm_mask_batch(input_ids, mask_token_id, vocab_size,
-                                                prob=args.mlm_prob, pad_id=pad_id)
+        for batch in loader:
+            if args.wwm:
+                input_ids, word_ids = batch
+                input_ids = input_ids.to(device, non_blocking=True)
+                word_ids = word_ids.to(device, non_blocking=True)
+                masked_ids, labels = mlm_mask_batch_wwm(
+                    input_ids, word_ids, mask_token_id, vocab_size,
+                    prob=args.mlm_prob, pad_id=pad_id)
+            else:
+                input_ids = batch
+                input_ids = input_ids.to(device, non_blocking=True)
+                masked_ids, labels = mlm_mask_batch(input_ids, mask_token_id, vocab_size,
+                                                    prob=args.mlm_prob, pad_id=pad_id)
             out = model(input_ids=masked_ids, labels=labels)
             loss = out.loss / args.gradient_accumulation_steps
             loss.backward()
