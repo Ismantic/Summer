@@ -8,9 +8,11 @@ Summer reproduces the **ReTok** methodology ([arXiv:2410.04335](https://arxiv.or
 
 Two-stage training:
 - **Phase 1** — freeze the transformer, train only `embed_tokens` + `lm_head` so the ~26% multi-mapped/fallback embedding rows can be learned without disturbing original Qwen weights.
-- **Phase 2** — unfreeze, joint-train all params (Muon/Aurora for 2D matrices, AdamW for embed/head). Historically destructive or a no-op; finding a Phase 2 recipe that adds real gain is the open research problem.
+- **Phase 2** — unfreeze (full or LoRA), joint-train. Full unfreeze was destructive in the Qwen3-0.6B / Muon-AdamW split era (v7–v16); the winning P2 recipe ended up being **LoRA tie-safe** on Qwen3-1.7B (`v17`–`v18`).
 
-Run versions are tracked as `v7`…`v16` (see `run_v*.sh`). Current Phase 1 SOTA is `v15`; current overall best is `v16` (P2 anneal on v15). `program.md` is an autonomous-research loop spec for iterating on Phase 2.
+Run versions are tracked as `v7`…`v19` (see `run_v*.sh`). **Current overall SOTA: `v18_p2_tie`** — Qwen3-1.7B + new 81903-piece tokenizer + LoRA tie-safe Phase 2 (1500 steps). WMT22 zh-en BLEU **20.46** vs base **22.34** (−1.88). Ckpt: `output/phase2_ckpt_v18_tie/checkpoint-1500/` (self-contained: `piece.model` + `dict.txt` + `adapter_model.safetensors` + `token_mapping.json`). Eval artifacts: `eval_results/full/v18_p2_tie_vllm/` + `eval_results/translate_wmt22/v18_p2_tie_*.json`.
+
+Earlier milestones (kept for context): Phase 1 SOTA `v15` and P2 anneal `v16` on Qwen3-0.6B; `v17` switched to Qwen3-1.7B + LoRA; `v18` added the new 81903 piece + tie-safe LoRA. `v19` is an unrun from-scratch experiment. `program.md` is an autonomous-research loop spec for iterating on Phase 2.
 
 ## Environment & external paths
 
