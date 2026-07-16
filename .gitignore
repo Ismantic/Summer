@@ -220,6 +220,7 @@ __marimo__/
 # Project-specific
 eval_results/
 output/
+hf_upload/
 *.pt
 checkpoints/
 experiments.tsv

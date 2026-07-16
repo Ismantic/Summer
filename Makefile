@@ -15,7 +15,7 @@ download:
 	$(HF_CLI) download Qwen/Qwen3-0.6B-Base --local-dir $(QWEN_BASE)
 
 replace:
-	$(PYTHON) replace_tokenizer.py \
+	$(PYTHON) tools/replace_tokenizer.py \
 	    --old_model_path $(QWEN_BASE) \
 	    --new_tokenizer_path $(PIECE_MODEL) \
 	    --output_path $(QWEN_NEW)
