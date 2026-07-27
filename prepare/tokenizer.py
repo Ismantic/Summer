@@ -83,6 +83,17 @@ def _first_in(model_dir, names):
     return None
 
 
+def has_piece_vocab(model_dir) -> bool:
+    """这个目录是 piece 词表的模型吗?
+
+    评测入口靠它决定用 PieceTokenizerWrapper 还是 AutoTokenizer。**不要各自
+    硬编码文件名** —— 新产出用上游名 `Summer-Tokenizer.pt`,旧的用
+    `piece.model`,漏一个就会静默退回 AutoTokenizer,而 AutoTokenizer 对这个
+    词表走不通,结果是错的。
+    """
+    return _first_in(model_dir, _MODEL_NAMES) is not None
+
+
 class PieceTokenizerWrapper:
     def __init__(self, model_dir, require_dict=True):
         """从模型目录加载。
@@ -199,9 +210,13 @@ class PieceTokenizerWrapper:
         import shutil
         os.makedirs(output_dir, exist_ok=True)
         # Copy piece.model
-        src = os.path.join(os.path.dirname(output_dir), "piece.model")
-        if os.path.exists(src):
-            shutil.copy2(src, os.path.join(output_dir, "piece.model"))
+        # 从自己加载时的实际路径拷,不猜文件名
+        if self.piece_model_path:
+            shutil.copy2(self.piece_model_path,
+                         os.path.join(output_dir, PIECE_MODEL_NAME))
+        if self.cn_dict_path:
+            shutil.copy2(self.cn_dict_path,
+                         os.path.join(output_dir, PIECE_DICT_NAME))
         # Save mapping
         mapping = {
             "bos_id": self.bos_token_id,

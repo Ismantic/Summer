@@ -65,8 +65,8 @@ def _default_comet() -> str:
     return str(_s.get("comet").dir())
 
 def load_tokenizer(model_path):
-    if os.path.exists(os.path.join(model_path, "piece.model")):
-        from prepare.tokenizer import PieceTokenizerWrapper
+    from prepare.tokenizer import PieceTokenizerWrapper, has_piece_vocab
+    if has_piece_vocab(model_path):
         return PieceTokenizerWrapper(model_path)
     from transformers import AutoTokenizer
     return AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)

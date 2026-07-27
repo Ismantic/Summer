@@ -49,9 +49,13 @@ from prepare.tokenizer import PieceTokenizerWrapper
 
 
 def _load_tokenizer(model_path: str):
-    """Auto-detect: piece.model present → piece tokenizer; else → HF AutoTokenizer.
-    Returns object with encode/decode + bos/eos/pad token ids."""
-    if os.path.exists(os.path.join(model_path, "piece.model")):
+    """有 piece 词表就用它,否则退回 HF AutoTokenizer。
+
+    判断走 `has_piece_vocab()`,不硬编码文件名 —— 新产出叫
+    Summer-Tokenizer.pt,旧的叫 piece.model。
+    """
+    from prepare.tokenizer import has_piece_vocab
+    if has_piece_vocab(model_path):
         return PieceTokenizerWrapper(model_path)
 
     # Fall back to HF tokenizer (e.g., for base Qwen3-0.6B-Base)

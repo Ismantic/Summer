@@ -78,12 +78,16 @@ def check(name, cond, detail=""):
 
 # ---- 1. cn-dict 模式 ----
 section("1. PieceTokenizer cn-dict 模式（词表是带 dict 训练的）")
-check("dict.txt 存在于模型目录", os.path.exists(os.path.join(NEW_TOK, "dict.txt")))
+from prepare.tokenizer import _DICT_NAMES, _MODEL_NAMES, _first_in
+_PIECE = _first_in(NEW_TOK, _MODEL_NAMES)
+_DICT = _first_in(NEW_TOK, _DICT_NAMES)
+check("词表存在于模型目录", _PIECE is not None, str(_PIECE))
+check("中文分词词典存在于模型目录", _DICT is not None, str(_DICT))
 
 raw = pt.Tokenizer()
-raw.load(os.path.join(NEW_TOK, "piece.model"))                       # 不带 dict
+raw.load(_PIECE)                                                     # 不带 dict
 cn = pt.Tokenizer()
-cn.load(os.path.join(NEW_TOK, "piece.model"), os.path.join(NEW_TOK, "dict.txt"))  # 带 dict
+cn.load(_PIECE, _DICT)                                               # 带 dict
 
 cn_text = "机器翻译是自然语言处理领域的重要任务，深度学习模型在大规模语料上预训练。" * 40
 t0 = time.time(); ids_cn = cn.encode_as_ids(cn_text); t_cn = time.time() - t0
