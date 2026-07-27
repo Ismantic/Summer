@@ -215,6 +215,16 @@ EVAL_SOURCES = {
              "`make -C prepare retok` 和评测 base 都要它。"
              "**这是必需输入,不是可选** —— 之前没登记是个疏漏。",
     ),
+    "retok_model": Source(
+        name="retok_model", kind="hf-snapshot",
+        repo_id="Ismantic/Qwen3-1.7B-Base-ReTok",
+        repo_type="model",
+        subdir="Qwen3-1.7B-Base-ReTok", part_glob="*.safetensors", n_parts=None,
+        note="**已发布的成品**(~3.1GB)。想直接用而不重训的人只要这个。"
+             "登记在这里而不是让文档写 `huggingface-cli download` —— 后者不清"
+             "代理,在本机走不通 hf-mirror(LocalEntryNotFoundError)。"
+             "`data/download.py` 在 import 阶段就摘掉代理。",
+    ),
     "comet": Source(
         name="comet", kind="hf-snapshot", repo_id="Unbabel/wmt22-comet-da",
         repo_type="model",
