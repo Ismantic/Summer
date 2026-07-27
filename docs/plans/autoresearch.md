@@ -28,7 +28,7 @@ priors.
    - `output/phase1_ckpt_v8` (Phase 1 ckpt — fixed start point)
    - `output/phase1_train_512_v7.pt` or `_v8.pt` (training data)
    - `output/valid_512.pt` (held-out valid set)
-   - `/home/tfbao/new/Qwen3-0.6B-Base` (base model for eval)
+   - `~/new/Qwen3-0.6B-Base` (base model for eval)
 2. **Read in-scope files**:
    - `CLAUDE.md` — project layout
    - `train/finetune_muon.py` — training loop (the file you'll touch most)

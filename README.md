@@ -45,10 +45,10 @@ python evals/eval_with_piece_vllm.py --model_path <ckpt> --task mmlu --num_fewsh
 
 ## Environment Assumptions
 
-Most scripts assume local paths under `/home/tfbao/...` and a prepared Python
-environment at `/home/tfbao/.venv`. The custom `piece_tokenizer` package is
+Most scripts assume local paths under `~/...` and a prepared Python
+environment at `~/.venv`. The custom `piece_tokenizer` package is
 expected to be installed from the sibling repository
-`/home/tfbao/Shiyu/PieceTokenizer`.
+`~/Shiyu/PieceTokenizer`.
 
 `dict.txt` is required for the piece tokenizer's Chinese pre-segmentation
 path. Without it, encoding can degrade from normal throughput to effectively

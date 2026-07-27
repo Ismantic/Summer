@@ -1,14 +1,14 @@
 # v18 Tie Model Lineage
 
-This document records how `/home/tfbao/Shiyu/Summer/output/phase2_ckpt_v18_tie`
+This document records how `~/Shiyu/Summer/output/phase2_ckpt_v18_tie`
 was produced, what data and commands were used, and how each stage performed.
 
 ## Final Artifact
 
 - Final model: `output/phase2_ckpt_v18_tie`
-- Downstream copy: `/home/tfbao/Shiyu/Interpreter/ReTok/models/phase2_ckpt_v18_tie`
+- Downstream copy: `~/Shiyu/Interpreter/ReTok/models/phase2_ckpt_v18_tie`
 - Verified matching files: `model.safetensors`, `piece.model`, `token_mapping.json`
-- Interpreter entrypoint: `/home/tfbao/Shiyu/Interpreter/ReTok/run_sft.sh`
+- Interpreter entrypoint: `~/Shiyu/Interpreter/ReTok/run_sft.sh`
 
 `phase2_ckpt_v18_tie` is the tie-preserving Phase 2 model. It was selected for
 Interpreter/ReTok because it keeps `tie_word_embeddings=true` after LoRA merge,
@@ -19,9 +19,9 @@ unlike the normal `phase2_ckpt_v18` run.
 Tokenizer surgery replaced the original Qwen tokenizer with the Piece tokenizer.
 
 - Log: `output/v18_replace.log`
-- Base model: `/home/tfbao/Shiyu/Interpreter/Translator/Qwen3-1.7B-Base`
-- Piece tokenizer: `/home/tfbao/Shiyu/PieceTokenizer/scripts/output/piece.model`
-- Init output: `/home/tfbao/new/Qwen3-1.7B-Base-new-tok-v18`
+- Base model: `~/Shiyu/Interpreter/Translator/Qwen3-1.7B-Base`
+- Piece tokenizer: `~/Shiyu/PieceTokenizer/scripts/output/piece.model`
+- Init output: `~/new/Qwen3-1.7B-Base-new-tok-v18`
 - Old vocab size: `151643`
 - New vocab size: `81903`
 - Old embedding shape: `(151936, 2048)`
@@ -58,7 +58,7 @@ Anneal corpus for Phase 2:
 Phase 1 trained only the new embeddings while freezing the transformer.
 
 - Script: `runs/run_v18_p1.sh`
-- Init: `/home/tfbao/new/Qwen3-1.7B-Base-new-tok-v18`
+- Init: `~/new/Qwen3-1.7B-Base-new-tok-v18`
 - Data: `output/v18_main_1024.pt`
 - Output: `output/phase1_ckpt_v18`
 - Key settings: `--freeze_transformer`, `--max_seq_length 1024`,

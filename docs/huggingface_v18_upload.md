@@ -39,7 +39,7 @@ Those are intermediate LoRA checkpoints, not the final release artifact.
 ## Prepare A Clean Upload Directory
 
 ```bash
-/home/tfbao/.venv/bin/python tools/prepare_hf_v18_retok.py
+~/.venv/bin/python tools/prepare_hf_v18_retok.py
 ```
 
 This creates:
@@ -57,19 +57,19 @@ is needed.
 Login once:
 
 ```bash
-/home/tfbao/.venv/bin/huggingface-cli login
+~/.venv/bin/huggingface-cli login
 ```
 
 Create the model repo:
 
 ```bash
-/home/tfbao/.venv/bin/huggingface-cli repo create Ismantic/Qwen3-1.7B-Base-ReTok --type model
+~/.venv/bin/huggingface-cli repo create Ismantic/Qwen3-1.7B-Base-ReTok --type model
 ```
 
 Upload the prepared directory:
 
 ```bash
-/home/tfbao/.venv/bin/huggingface-cli upload \
+~/.venv/bin/huggingface-cli upload \
   Ismantic/Qwen3-1.7B-Base-ReTok \
   hf_upload/Qwen3-1.7B-Base-ReTok \
   . \

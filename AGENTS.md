@@ -23,4 +23,4 @@ There is no dedicated unit-test package here; validation is script-based. For to
 Match the existing history's short, component-first subjects, such as `CLAUDE.md: ...`, `BERT/train_bert_mlm.py: ...`, or `v19 ...`. Keep each commit scoped to one experiment or tooling change. Pull requests should state the experiment goal, touched scripts, required local paths or GPU assumptions, commands executed, and where reviewers can find metrics or logs. Do not commit model weights, downloaded corpora, or other large generated artifacts.
 
 ## Environment Notes
-Many scripts assume `/home/tfbao/...` paths and fixed CUDA devices. When updating shared scripts, preserve those defaults only if they remain overrideable via variables like `QWEN_BASE`, `QWEN_NEW`, `OUT`, and `LIMIT`.
+Many scripts assume `~/...` paths and fixed CUDA devices. When updating shared scripts, preserve those defaults only if they remain overrideable via variables like `QWEN_BASE`, `QWEN_NEW`, `OUT`, and `LIMIT`.

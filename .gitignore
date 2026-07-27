@@ -222,24 +222,17 @@ eval_results/
 output/
 hf_upload/
 *.pt
+# 回归测试的固定切片必须进版本库 —— 少了它 test_reproduce_sota
+# 的 ppl 那项会静默跳过(而不是失败),等于没有防线。
+!test/fixtures/*.pt
 checkpoints/
 experiments.tsv
 corpus_v17/
+# 四层改造期间的暂存区,阶段 6 逐条确认后才彻底删。见 _attic/MANIFEST.md
+_attic/
 tokenizer_corpus/
-BERT/bert_init*/
-BERT/bert_train*/
-BERT/piece_char*/
-BERT/sp_char*/
-BERT/train_*.pt
-BERT/train_*.pt.meta
-BERT/*.log
-# NLP_BERT_CRF: 只 ignore 数据/产物,代码进 repo
-BERT/NLP_BERT_CRF/data/
-BERT/NLP_BERT_CRF/output_*/
-BERT/NLP_BERT_CRF/logs/
-BERT/NLP_BERT_CRF/macbert-large/
-BERT/NLP_BERT_CRF/roberta-wwm-ext/
-BERT/NLP_BERT_CRF/__pycache__/
-BERT/NLP_BERT_CRF/*.log
-BERT/NLP_BERT_CRF/*.pt
-BERT/NLP_BERT_CRF/eval_results/
+
+# 本机 PY/PY_EVAL 路径,见各层 Makefile
+local.mk
+deps/
+data/downloads/

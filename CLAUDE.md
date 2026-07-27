@@ -17,10 +17,10 @@ Earlier milestones (kept for context): Phase 1 SOTA `v15` and P2 anneal `v16` on
 ## Environment & external paths
 
 These are absolute and assumed by nearly every script — do not relativize them:
-- Python venv: `/home/tfbao/.venv/bin/python` (Python 3.11; `torch`, `transformers`, `vllm`, `lm_eval`, `accelerate`).
-- `piece_tokenizer` — built from sibling repo `/home/tfbao/Shiyu/PieceTokenizer` (`pip install -e .`). Its `load(model_file, cn_dict)` takes the CN segmentation dict as a second arg.
-- Base model weights: `/home/tfbao/new/Qwen3-0.6B-Base`, `/home/tfbao/new/Qwen3-1.7B-Base`.
-- Tokenizer-swapped model: `/home/tfbao/new/Qwen3-0.6B-Base-new-tok`.
+- Python venv: `~/.venv/bin/python` (Python 3.11; `torch`, `transformers`, `vllm`, `lm_eval`, `accelerate`).
+- `piece_tokenizer` — built from sibling repo `~/Shiyu/PieceTokenizer` (`pip install -e .`). Its `load(model_file, cn_dict)` takes the CN segmentation dict as a second arg.
+- Base model weights: `~/new/Qwen3-0.6B-Base`, `~/new/Qwen3-1.7B-Base`.
+- Tokenizer-swapped model: `~/new/Qwen3-0.6B-Base-new-tok`.
 - Checkpoints and pretokenized data live under `./output/`; eval artifacts under `./eval_results/`. Both are gitignored.
 
 **`dict.txt` is mandatory.** Without the CN segmentation dict, `PieceTokenizer::Encode` runs greedy BPE over the whole input as one chunk (~O(n²), 100–1500× slower on long prompts). `core/tokenizer_wrapper.py` auto-loads `dict.txt` if present in the model dir; after `make replace`, copy `dict.txt` into the new-tok dir alongside `piece.model`.
