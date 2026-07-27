@@ -13,7 +13,7 @@ src/        模型 + 训练。**只依赖 torch**
 save/       导出 HF 发布包 + 上传 + 核对
 ```
 
-外加 `deps/`(gitignore)、`docs/`、`test/`、`papers/`。产物落 `output/` 和
+外加 `deps/`(gitignore)、`docs/`、`test/`。产物落 `output/` 和
 `eval_results/`,都 gitignore。
 
 两条不能破坏的分层约束:**`src/` 只依赖 torch**;**`src/` 不碰文本**
