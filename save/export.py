@@ -170,7 +170,24 @@ def main() -> None:
         link_or_copy(source / name, out / name, args.copy)
 
     shutil.copy2(ROOT / "prepare" / "tokenizer.py", out / "tokenizer_wrapper.py")
-    shutil.copy2(ROOT / "docs" / "reports" / "v18_tie_lineage.md", out / "training_lineage.md")
+    # lineage 报告开头有一段给**仓库内读者**的时效声明(讲 core/ evals/ 那些
+    # 目录改造后不存在了)。那段对只下模型的人没意义,拷进发布包反而突兀 ——
+    # 剥掉开头连续的引用块。
+    lineage = (ROOT / "docs" / "reports" / "v18_tie_lineage.md").read_text().split("\n")
+    kept, i = [], 0
+    # 保留一级标题
+    while i < len(lineage) and not lineage[i].startswith("#"):
+        i += 1
+    if i < len(lineage):
+        kept.append(lineage[i])
+        i += 1
+    # 跳过标题之后的空行 + 第一个引用块
+    while i < len(lineage) and not lineage[i].strip():
+        i += 1
+    while i < len(lineage) and lineage[i].startswith(">"):
+        i += 1
+    write_text(out / "training_lineage.md",
+               "\n".join(kept + lineage[i:]).lstrip("\n"))
     write_text(out / "README.md", MODEL_CARD.replace(DEFAULT_REPO_ID, args.repo_id))
     write_text(out / ".gitattributes", GITATTRIBUTES)
     write_text(out / "requirements.txt", REQUIREMENTS)
