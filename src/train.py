@@ -51,7 +51,7 @@ class PreTokenizedDataset(Dataset):
     """Pre-tokenized dataset from a .pt file (shape: [N, seq_len], dtype: int32)."""
     def __init__(self, pt_file):
         self.data = torch.load(pt_file, weights_only=True).long()
-        print(f"[PreTok] Loaded {self.data.shape[0]} chunks from {pt_file}, seq_len={self.data.shape[1]}")
+        print(f"[PreTok] Loaded {self.data.shape[0]} chunks from {pt_file}, seq_len={self.data.shape[1]}", flush=True)
 
     def __len__(self):
         return self.data.shape[0]
@@ -86,7 +86,7 @@ def build_optimizer(model, muon_lr, adam_lr, muon_momentum, weight_decay, use_au
     rule = "Aurora" if use_aurora else "Muon"
     if moonshot_scaling:
         rule = f"{rule}+MoonshotLR"
-    print(f"{rule} params: {muon_count:,} | Adam params: {adam_count:,}  (wd={weight_decay})")
+    print(f"{rule} params: {muon_count:,} | Adam params: {adam_count:,}  (wd={weight_decay})", flush=True)
 
     if muon_params:
         param_groups = [
@@ -116,7 +116,12 @@ def train(args):
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
     def log(*a, **kw):
+        # **必须 flush。** 重定向到文件时 Python 的 stdout 是块缓冲(8KB),
+        # 不是行缓冲 —— p1 要跑 28 小时,而 logging_steps=50 一条日志才 ~90 字节,
+        # 攒满 8KB 要几千步。表现是「跑了半小时日志还是空的」,看着像卡死,
+        # 实际 GPU 一直满载。2026-07-28 真踩了一次,白等 40 分钟。
         if is_main:
+            kw.setdefault("flush", True)
             print(*a, **kw)
 
     # pad id 从 token_mapping.json 直接读 —— src/ 不加载分词器(那是 prepare/ 的事)
@@ -304,7 +309,7 @@ def train(args):
         if interrupted:  # second Ctrl+C = force quit
             raise KeyboardInterrupt
         interrupted = True
-        print(f"\nCtrl+C received at step {step}, saving checkpoint...")
+        print(f"\nCtrl+C received at step {step}, saving checkpoint...", flush=True)
     signal.signal(signal.SIGINT, _sigint_handler)
 
     epoch = 0
@@ -363,7 +368,7 @@ def train(args):
                         else:
                             raw_model.save_pretrained(save_path)
                         _copy_tokenizer_artifacts(args.model_path, save_path)
-                        print(f"Saved checkpoint to {save_path}")
+                        print(f"Saved checkpoint to {save_path}", flush=True)
                     if is_distributed:
                         dist.barrier()
                     # Inline eval (CPU-offload pattern) if requested
@@ -380,7 +385,7 @@ def train(args):
         os.makedirs(args.output_dir, exist_ok=True)
         raw_model.save_pretrained(args.output_dir)
         _copy_tokenizer_artifacts(args.model_path, args.output_dir)
-        print(f"Saved final model to {args.output_dir}")
+        print(f"Saved final model to {args.output_dir}", flush=True)
 
     elapsed = time.time() - t0
     log(f"Training complete: {step} steps in {elapsed:.1f}s ({step/elapsed:.2f} steps/s)")
