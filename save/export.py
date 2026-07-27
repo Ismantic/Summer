@@ -52,25 +52,61 @@ Hugging Face repo id: `Ismantic/Qwen3-1.7B-Base-ReTok`
 
 This repository contains the custom tokenizer assets:
 
-- `piece.model` — the 81,903-piece vocabulary
-- `dict.txt` — **Chinese segmentation dictionary. Not optional.**
+- `Summer-Tokenizer.pt` — the 81,903-piece vocabulary
+- `Summer-Tokenizer.dict.txt` — **Chinese segmentation dictionary. Not optional.**
 - `token_mapping.json` — pad / bos / eos ids
-- `tokenizer_wrapper.py` — the loader you should use
+- `tokenizer.py` — the loader you should use
 
 The model architecture loads through Transformers as Qwen3, but **the tokenizer
 is not a standard Qwen tokenizer and `AutoTokenizer` will not work.** Use the
 bundled wrapper:
 
 ```python
-from tokenizer_wrapper import PieceTokenizerWrapper
+from tokenizer import PieceTokenizerWrapper
 tok = PieceTokenizerWrapper(".")          # the directory holding these files
 ids = tok.encode("中国科学院计算技术研究所在北京")
 ```
 
-**Keep `dict.txt` next to `piece.model`.** Without it Chinese text tokenizes to
-*different ids* — not just slower. Round-trip decoding still returns the original
-string, so the breakage is silent; the model simply receives input it was never
-trained on. The wrapper raises rather than falling back.
+**Keep `Summer-Tokenizer.dict.txt` next to `Summer-Tokenizer.pt`.** Without it
+Chinese text tokenizes to *different ids* — not just slower. Round-trip decoding
+still returns the original string, so the breakage is silent; the model simply
+receives input it was never trained on. The loader raises rather than falling back.
+
+## Running with vLLM
+
+vLLM loads the **weights** fine — `config.json` declares `Qwen3ForCausalLM`, so
+vLLM uses its own Qwen3 implementation and maps weights by state-dict key. It
+cannot use the **tokenizer**, so pass `skip_tokenizer_init=True` and feed token
+ids yourself:
+
+```python
+from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
+from tokenizer import PieceTokenizerWrapper
+
+tok = PieceTokenizerWrapper(".")
+llm = LLM(model=".", skip_tokenizer_init=True, dtype="bfloat16")
+
+ids = tok.encode("中国科学院计算技术研究所", add_special_tokens=False)
+out = llm.generate([TokensPrompt(prompt_token_ids=ids)],
+                   SamplingParams(temperature=0.0, max_tokens=64,
+                                  stop_token_ids=[tok.eos_token_id]))
+print(tok.decode(list(out[0].outputs[0].token_ids)))
+```
+
+See `example_vllm.py`. **`vllm serve` does not work out of the box** — the
+OpenAI-compatible server needs to turn text into tokens and cannot do so with
+this vocabulary; callers must send token ids.
+
+## Files
+
+| | |
+|---|---|
+| `model.safetensors` | weights, 310 tensors (tied — no `lm_head.weight`) |
+| `Summer-Tokenizer.pt` | the 81,903-piece vocabulary, same file as in [PieceTokenizer](https://github.com/Ismantic/PieceTokenizer)'s `save/` |
+| `Summer-Tokenizer.dict.txt` | Chinese segmentation dictionary — **required** |
+| `model.py` `checkpoint.py` `tokenizer.py` | pure-torch inference code, so **no `transformers` and no `safetensors` needed** |
+| `example_load.py` `example_vllm.py` | runnable examples |
 
 ## Training Summary
 
@@ -176,6 +212,56 @@ print(prompt + tok.decode(out))
 '''
 
 
+
+EXAMPLE_VLLM = '''"""用 vLLM 跑这个模型。
+
+    pip install vllm
+    pip install git+https://github.com/Ismantic/PieceTokenizer
+    python example_vllm.py
+
+## 为什么要 skip_tokenizer_init
+
+vLLM 能加载**权重** —— config.json 里 architectures 是 Qwen3ForCausalLM,
+它用自己那份 Qwen3 实现,按 state_dict 的 key 名灌进去。
+
+但它**认不了这个词表**:81903 的 piece 词表不是 HF 标准格式,AutoTokenizer
+走不通。所以要 skip_tokenizer_init=True,自己编码好 token id 用 TokensPrompt
+喂进去,拿回来的 id 自己解码。
+
+推论:`vllm serve` 那种 OpenAI 兼容服务**开箱用不了** —— 它要把文本转成
+token,而它转不了。调用方得自己传 token id。
+"""
+import torch
+from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
+
+from tokenizer import PieceTokenizerWrapper
+
+HERE = "."
+
+tok = PieceTokenizerWrapper(HERE)
+llm = LLM(model=HERE, skip_tokenizer_init=True, dtype="bfloat16",
+          gpu_memory_utilization=0.85, max_model_len=4096,
+          trust_remote_code=True)
+
+prompts = [
+    "中国科学院计算技术研究所",
+    "The capital of France is",
+]
+
+outputs = llm.generate(
+    [TokensPrompt(prompt_token_ids=tok.encode(p, add_special_tokens=False))
+     for p in prompts],
+    SamplingParams(temperature=0.0, max_tokens=64,
+                   stop_token_ids=[tok.eos_token_id]),
+)
+
+for prompt, out in zip(prompts, outputs):
+    print(f"\\n{prompt}", end="")
+    print(tok.decode(list(out.outputs[0].token_ids)))
+'''
+
+
 # 发布包里的文件名。**词表用上游名** —— 与 PieceTokenizer 仓库 save/ 下同名,
 # 这样拿到发布包的人一眼就知道词表出自哪里(BERTc 的发布包里就叫
 # BERTc-Tokenizer.pt)。源 checkpoint 里可能是旧名,所以按 (源名候选, 目标名) 写。
@@ -244,6 +330,7 @@ def main() -> None:
     shutil.copy2(ROOT / "src" / "model.py", out / "model.py")
     shutil.copy2(ROOT / "src" / "checkpoint.py", out / "checkpoint.py")
     write_text(out / "example_load.py", EXAMPLE_LOAD)
+    write_text(out / "example_vllm.py", EXAMPLE_VLLM)
     # lineage 报告开头有一段给**仓库内读者**的时效声明(讲 core/ evals/ 那些
     # 目录改造后不存在了)。那段对只下模型的人没意义,拷进发布包反而突兀 ——
     # 剥掉开头连续的引用块。
