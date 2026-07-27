@@ -13,7 +13,7 @@
 不带 --model_path 时按顺序找:save/sota/v18_p2_tie → output/phase2_ckpt_v18_tie
 → output/init_retok。都没有就跳过(**不算通过**)。
 
-原版写死了 0.6B 时代的 `~/new/Qwen3-0.6B-Base-new-tok-v2`,
+原版写死了 0.6B 时代的一个本机路径,
 那两个目录早就不在了 —— 阶段 4 改成走参数 + 注册表。
 """
 import os

@@ -8,15 +8,15 @@
 > 不可复现,同一 ckpt 跑 6 次 BLEU 的 range 是 0.10–0.13(zh-en)/ 0.13(en-zh)。
 > 见 `docs/WHY.md` 第二节。
 
-This document records how `~/Shiyu/Summer/output/phase2_ckpt_v18_tie`
+This document records how `~/Summer/output/phase2_ckpt_v18_tie`
 was produced, what data and commands were used, and how each stage performed.
 
 ## Final Artifact
 
 - Final model: `output/phase2_ckpt_v18_tie`
-- Downstream copy: `~/Shiyu/Interpreter/ReTok/models/phase2_ckpt_v18_tie`
+- Downstream copy: `~/Interpreter/ReTok/models/phase2_ckpt_v18_tie`
 - Verified matching files: `model.safetensors`, `piece.model`, `token_mapping.json`
-- Interpreter entrypoint: `~/Shiyu/Interpreter/ReTok/run_sft.sh`
+- Interpreter entrypoint: `~/Interpreter/ReTok/run_sft.sh`
 
 `phase2_ckpt_v18_tie` is the tie-preserving Phase 2 model. It was selected for
 Interpreter/ReTok because it keeps `tie_word_embeddings=true` after LoRA merge,
@@ -27,8 +27,8 @@ unlike the normal `phase2_ckpt_v18` run.
 Tokenizer surgery replaced the original Qwen tokenizer with the Piece tokenizer.
 
 - Log: `output/v18_replace.log`
-- Base model: `~/Shiyu/Interpreter/Translator/Qwen3-1.7B-Base`
-- Piece tokenizer: `~/Shiyu/PieceTokenizer/scripts/output/piece.model`
+- Base model: `~/Interpreter/Translator/Qwen3-1.7B-Base`
+- Piece tokenizer: `~/PieceTokenizer/scripts/output/piece.model`
 - Init output: `~/new/Qwen3-1.7B-Base-new-tok-v18`
 - Old vocab size: `151643`
 - New vocab size: `81903`

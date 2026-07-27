@@ -24,7 +24,7 @@
 评测依赖两个 venv(原因见 `_attic/MANIFEST.md`「试过合并成单个 venv,不行」):
 
     python test/test_reproduce_sota.py --only ppl                        # .venv
-    python test/test_reproduce_sota.py --python ~/.venv-eval/bin/python
+    python test/test_reproduce_sota.py --python ~/.venv-e/bin/python
 
 这个文件在四层改造期间就位,目的是让每个阶段结束都有东西可跑。脚本位置
 用多处试探(改造前在 evals/,改造后在 prepare/ 或 src/),所以搬目录不用改它。
@@ -166,7 +166,7 @@ def resolve_comet() -> Path | None:
         registered = None
     return first_existing(
         *(p for p in (registered,) if p is not None),
-        Path("~/a6000/Summer-data/comet-wmt22-da"),
+        Path.home() / "a6000/Summer-data/comet-wmt22-da",
     )
 
 

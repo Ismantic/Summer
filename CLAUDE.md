@@ -37,13 +37,16 @@ save/       导出 HF 发布包 + 上传 + 核对
 
 ## 环境
 
-- 训练:`~/.venv`(Python 3.14,torch 2.11+cu13)。
+- **一个 venv 就够:`~/.venv-e`(Python 3.11,torch 2.11+cu13 + vllm + comet
+  + lm_eval)。** 训练和评测都在它里面。
   **用 `uv pip install`,这个 venv 里没有 pip。**
-- 评测:`~/.venv-eval`(Python 3.11,vllm + comet + lm_eval)。
-  **两个 venv 是必要的,不是历史遗留** —— vllm 和 comet 都上不了 3.14,
-  试过合并,失败并完整回滚(见 `docs/WHY.md` 第五节)。
-- 两个路径写在 gitignore 的 `local.mk`(`PY` / `PY_EVAL`)。
+- 曾经是两个(3.14 训练 + 3.11 评测),因为 vllm 和 comet 都上不了 3.14。
+  **方向搞反了才卡住** —— 往 3.14 装 vllm 不行,但把训练搬到 3.11 完全可以:
+  `src/` 只依赖 torch,torch 支持 3.11。合并的验证见 `docs/WHY.md` 第五节。
+- 路径写在 gitignore 的 `local.mk`(`PY`,`PY_EVAL` 指同一个)。
   **不要把路径写回 Makefile**,那样别的机器就跑不了。
+  **也不要在跟踪的文件里写本机绝对路径** —— 那会把用户名推到 GitHub 上,
+  `make test` 里的 `test-noleak` 会拦。
 - GPU:单张 RTX 4090(24GB,bf16)。**没有多卡代码路径。**
 - C++ 依赖:`make deps` clone 并编译 PieceTokenizer。
   **词表在它仓库的 `save/` 下,本仓库不留副本** ——

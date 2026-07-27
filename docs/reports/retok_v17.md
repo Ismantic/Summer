@@ -24,7 +24,7 @@
 | `~/new/Qwen3-0.6B-Base`（base 权重） | ❌ 不存在（在另一台机器，需重新下载） |
 | 训练语料（`/mnt/data/...`、`~/Data/...`） | ❌ `/mnt/data` 整个不存在，需重新下载 |
 | `output/`（预处理 .pt、所有 checkpoint） | ❌ 目录不存在 |
-| 新词表 `piece.model` | ✅ `~/Shiyu/PieceTokenizer/scripts/output/piece.model`（81899） |
+| 新词表 `piece.model` | ✅ `~/PieceTokenizer/scripts/output/piece.model`（81899） |
 | `dict.txt`（中文分词词典） | ✅ Summer 目录内已有，可复用 |
 
 所以这不是"重跑几个脚本"，而是**从零重建**：重新下模型、下语料、重新预处理、重新训练。
@@ -36,7 +36,7 @@
 
 | 用途 | 路径 |
 |---|---|
-| 新分词器模型 | `~/Shiyu/Summer/piece_v2.model`（已生成，见 Step 1） |
+| 新分词器模型 | `~/Summer/piece_v2.model`（已生成，见 Step 1） |
 | 换分词器后的模型目录 | `~/new/Qwen3-0.6B-Base-new-tok-v2` |
 | Phase 1 训练数据 | `output/phase1_train_512_v17.pt` |
 | Phase 2 anneal 数据 | `output/v17_anneal_512.pt` |
@@ -62,11 +62,11 @@ score=0 的 CONTROL piece。**直接在文件层面追加这 4 行即可，无�
 为此写了 `PieceTokenizer/scripts/add_extra_tokens.py`。已执行：
 
 ```bash
-cd ~/Shiyu/PieceTokenizer/scripts
+cd ~/PieceTokenizer/scripts
 python add_extra_tokens.py \
     --input  output/piece.model \
     --extra-tokens "<pad>,<user>,<assistant>,<system>" \
-    --output ~/Shiyu/Summer/piece_v2.model
+    --output ~/Summer/piece_v2.model
 ```
 
 产出 `piece_v2.model`：vocab 81903，`<pad>=81899 <user>=81900 <assistant>=81901
@@ -81,7 +81,7 @@ python add_extra_tokens.py \
 `~/new/Qwen3-0.6B-Base`：
 
 ```bash
-cd ~/Shiyu/Summer
+cd ~/Summer
 make download         # 或 HF_ENDPOINT=https://hf-mirror.com make download
 ```
 
@@ -94,12 +94,12 @@ make download         # 或 HF_ENDPOINT=https://hf-mirror.com make download
 ```bash
 python tools/replace_tokenizer.py \
     --old_model_path     ~/new/Qwen3-0.6B-Base \
-    --new_tokenizer_path ~/Shiyu/Summer/piece_v2.model \
+    --new_tokenizer_path ~/Summer/piece_v2.model \
     --output_path        ~/new/Qwen3-0.6B-Base-new-tok-v2
 
 # 关键：复制【词表训练时用的那个】中文分词词典 —— 必须是 PieceTokenizer/dict.txt
 # （359987 行，md5 2225d23），不是 Summer/dict.txt（320000 行，内容不同）。
-cp ~/Shiyu/PieceTokenizer/dict.txt ~/new/Qwen3-0.6B-Base-new-tok-v2/dict.txt
+cp ~/PieceTokenizer/dict.txt ~/new/Qwen3-0.6B-Base-new-tok-v2/dict.txt
 ```
 
 `tools/replace_tokenizer.py` 会：为 81903 个 piece 逐个用 Qwen BBPE 编码、取均值映射到旧 embedding
@@ -246,7 +246,7 @@ python evals/eval_analysis.py                     # 生成 % loss vs base 对比
   `uv pip install --python ~/.venv/bin/python ...`。
 - **piece_tokenizer**：venv 里原先装的是 `~/ShiyuLab/Tokenizer` 的旧版绑定
   （`load()` 只接受单参数），与 `core/tokenizer_wrapper.py` 期望的 `load(model, cn_dict)`
-  双参数不符。已用 `uv pip install --reinstall --no-cache ~/Shiyu/PieceTokenizer`
+  双参数不符。已用 `uv pip install --reinstall --no-cache ~/PieceTokenizer`
   重新编译安装，现指向正确的 repo。
 - **cn-dict 不是纯加速**：验证发现它会**改变分词结果** —— 在词边界 pre-cut，避免 BPE
   跨词乱 merge（例：`编码器和解码器`，no-dict 会错切成 `和解|码`，cn-dict 正确切 `和|解码`）。

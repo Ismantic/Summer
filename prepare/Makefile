@@ -30,7 +30,8 @@
 # ## 两个解释器
 #
 # PY       训练(src/ 只要 torch)
-# PY_EVAL  评测(要 vllm + comet,上不了 Python 3.14,得单开 3.11 的 venv)
+# PY_EVAL  评测(要 vllm + comet)。**和 PY 同一个 venv 就行**;留着这个变量
+#          是为了别的机器上还能拆开。
 # 都写在仓库根的 local.mk(gitignore)里。
 
 HERE  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))

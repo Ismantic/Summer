@@ -41,10 +41,10 @@ demo:
 # 本身就是不必要的风险(别人可能已经下走了)。
 # 先 `make verify` 确认权重与线上一致,再决定用哪个。
 upload-dry:
-	$(PY) -m save.upload --dry-run
+	PYTHONPATH=$(ROOT) $(PY) -m save.upload --dry-run
 
 upload-code:
-	$(PY) -m save.upload --code-only
+	PYTHONPATH=$(ROOT) $(PY) -m save.upload --code-only
 
 upload:
-	$(PY) -m save.upload
+	PYTHONPATH=$(ROOT) $(PY) -m save.upload

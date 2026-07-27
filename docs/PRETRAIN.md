@@ -59,10 +59,11 @@ clone 并编译 [PieceTokenizer](https://github.com/Ismantic/PieceTokenizer)。
 
 ```makefile
 PY      = /path/to/venv-3.14/bin/python     # 训练,只要 torch
-PY_EVAL = /path/to/venv-3.11/bin/python     # 评测,vllm + comet + lm_eval
+PY_EVAL = /path/to/venv-3.11/bin/python     # 评测;和 PY 同一个就行
 ```
 
-**两个 venv 是必要的** —— vllm 和 comet 都上不了 Python 3.14。原因见
+**一个 3.11 的 venv 就够**(训练 + 评测)。曾经拆成两个是因为 vllm 和 comet
+上不了 3.14 —— 但把训练搬到 3.11 就都解决了。原因和验证见
 `WHY.md` 第五节。
 
 ## 1. 数据

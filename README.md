@@ -110,7 +110,7 @@ argmax **100% 一致**;与 peft 对拍 logits **逐位相同**。
 - 训练:Python 3.14 + torch 2.11,单张 RTX 4090(24GB,bf16)。
   **没有多卡代码路径。**
 - 评测:需要 vllm + comet,它们上不了 3.14 —— 得单开一个 3.11 的 venv。
-  两个解释器路径写在 gitignore 的 `local.mk` 里(`PY` / `PY_EVAL`)。
+  解释器路径写在 gitignore 的 `local.mk` 里(`PY`;`PY_EVAL` 指同一个)。
   为什么合并不了见 [`docs/WHY.md`](docs/WHY.md)。
 - C++ 依赖:[PieceTokenizer](https://github.com/Ismantic/PieceTokenizer),
   `make deps` 自动 clone 并编译。**81903 词表和中文分词词典都在它仓库里,

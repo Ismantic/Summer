@@ -1,9 +1,10 @@
-# Summer 的 Python 依赖(训练侧)。装法:
-#     uv pip install -r requirements.txt
+# Summer 的 Python 依赖(训练侧)。**一个 Python 3.11 的 venv 装全部**:
+#     uv venv --python 3.11 ~/.venv-e
+#     uv pip install --python ~/.venv-e/bin/python -r requirements.txt
+#     uv pip install --python ~/.venv-e/bin/python -r requirements-eval.txt
 #
-# **评测另装。** vllm 和 comet 上不了 Python 3.14,得单开一个 3.11 的 venv:
-#     uv pip install -r requirements-eval.txt
-# 为什么合并不了见 docs/WHY.md 第五节(试过,失败并完整回滚)。
+# 为什么是 3.11 而不是更新的:vllm 和 comet 上不了 3.14。训练侧下得来
+# (src/ 只依赖 torch),评测侧上不去 —— 所以就位在 3.11。见 docs/WHY.md 第五节。
 #
 # C++ 依赖(PieceTokenizer)不在这里 —— 它要 clone 加编译,由 `make deps` 装,
 # 见 prepare/install_deps.sh。81903 词表和中文分词词典也在那个仓库里。
@@ -23,3 +24,9 @@ pyarrow>=15                # 流式读 parquet 语料
 tqdm>=4.66
 transformers>=4.56         # 只有 prepare/retok.py 用 —— 要读 Qwen 原生 BBPE
                            # 来做嵌入映射。src/ 不需要它。
+
+# --- 测试的对拍依赖(test/)-------------------------------------------------
+# **缺了不会失败,会静默降级。** test_lora.py 没有 peft 就只做自查、照样打印
+# 「通过」,数学判据就没了;test_model_equiv.py 没有 transformers 同理。
+peft>=0.10                 # test_lora.py 的对拍基准
+pybind11>=2.12             # 编 PieceTokenizer 要(prepare/install_deps.sh 会装)

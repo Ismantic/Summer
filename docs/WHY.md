@@ -353,21 +353,48 @@ key 是我们与 vLLM / transformers 之间**唯一的契约**。改了它,vLLM 
 `is_causal`,不接受 `attention_mask`,而 SFT 会 padding,忽略 mask 会让 padding
 位参与注意力,算错且不报错。
 
-### 两个 venv 是必要的,不是历史遗留
+### 一个 venv 就够 —— 但方向搞反了就以为不行
 
-试过合并成一个,**不行**:
+现在只有一个:`~/.venv-e`(Python 3.11),训练和评测都在里面。
+
+**先试的方向是错的。** 当时想把 vllm + comet 装进 3.14 那个训练 venv,失败:
 
 - vllm 没有可用的 cp314 构建
 - comet 的依赖链(torchmetrics 0.10.3)要 `functools._HashedSeq`,3.14 里没有了
+- `uv pip install vllm unbabel-comet` 把解拽回 **vllm 0.2.5**(2023 年底,不认识
+  Qwen3),连带降级 numpy / pandas / pydantic。已靠事前的 `uv pip freeze` 完整回滚
 
-而且 `uv pip install vllm unbabel-comet` 会把解拽回 **vllm 0.2.5**(2023 年底,
-不认识 Qwen3),连带降级 numpy / pandas / pydantic。已完整回滚。
+于是写下了「两个 venv 是必要的」。**这个结论下早了** —— 它只证明了「vllm 上不了
+3.14」,没有证明「训练下不到 3.11」。反方向根本没试。
 
-    PY       .venv (3.14)       训练 —— 只要 torch
-    PY_EVAL  .venv-eval (3.11)  评测 —— vllm + comet + lm_eval
+反方向是通的,因为 `src/` 只依赖 torch,而 torch 有 cp311。2026-07-27 验证:
 
-教训:`uv pip install --dry-run <A>` 的结果**不代表** `install <A> <B>` 的结果。
-装之前先 `uv pip freeze` 存快照 —— 这次靠它做到了精确回滚。
+    分词       两个 Python 上 vocab_sha / dict_sha / 5 段文本逐 id 完全相同
+    forward    固定切片 next-token loss 2.3334(3.11)vs 2.3331(3.14)
+    对拍       与 transformers 逐层对齐、与 peft 误差 0.000e+00,都在 3.11 上跑通
+    训练       同 seed 12 步,step 1-2 loss 逐位相同,之后差在第 4 位小数
+    速度       稳态都是 0.30s/step;3.11 启动慢 10 秒,那是 compile 开销不是吞吐
+
+合并要补两块,都不明显:
+
+- **`piece_tokenizer` 必须是 editable 装法**,不能是拷进 site-packages 的裸
+  `.so`。`resolve_assets()` 靠 `piece_tokenizer.__file__` 反查词表,拷进去就
+  查不到了。
+- **`peft` 得装**,不然 `test_lora.py` 静默降级成「自查通过(未与 peft 对拍)」——
+  数学判据就没了,而它照样打印「通过」。
+
+另外 PieceTokenizer 的 `setup.py` 传的是 `-DPYTHON_EXECUTABLE`,**新版 CMake 的
+`FindPython` 不认这个名字**(要 `Python_EXECUTABLE`),于是它去挑系统 python。
+之前在 3.14 上没暴露纯属巧合 —— 系统 python 恰好也是 3.14,ABI tag 撞对了。
+换 3.11 就露馅:产出 `cpython-314` 的名字,setuptools 在等 `cpython-311`,
+报的错却是「.so 不存在」。见 `prepare/install_deps.sh` 里的处理。
+
+教训两条:
+
+- `uv pip install --dry-run <A>` 的结果**不代表** `install <A> <B>` 的结果。
+  装之前先 `uv pip freeze` 存快照。
+- **「A 装不进 B」不等于「B 装不进 A」。** 一个方向失败就写下结论,会把一个
+  临时状态固化成架构。
 
 ### 并发默认不写死
 
@@ -378,7 +405,8 @@ key 是我们与 vLLM / transformers 之间**唯一的契约**。改了它,vLLM 
 现在默认 `min(12, cpu_count() - 1)`。再多也只是抢内存,I/O 早就饱和了。
 
 同类的还有 `requirements.txt` —— 改造前根本没有这个文件,新用户不知道该装什么。
-现在分成两份(训练 / 评测),对应那两个 venv。
+现在分成两份:`requirements.txt`(训练要的)和 `requirements-eval.txt`(评测再加的)。
+装到同一个 venv 里就行,拆成两个文件只是为了说清「哪些是评测才需要的」。
 
 ### 没有多卡代码路径
 

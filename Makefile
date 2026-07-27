@@ -17,7 +17,8 @@
 # 那样别的机器就跑不了。需要两个:
 #
 #   PY       训练 / src(只要 torch)
-#   PY_EVAL  评测(vllm + comet,上不了 Python 3.14,得单开一个 3.11 的 venv)
+#   PY_EVAL  评测(vllm + comet)。**现在和 PY 是同一个 venv** —— 留着这个变量
+#            是为了别的机器上还能拆成两个。
 
 HERE := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 -include $(HERE)local.mk
@@ -49,10 +50,16 @@ deps:
 # ppl 几秒,trans 约 5 分钟,mono 约 36 分钟。日常改完跑 test-ppl 就够。
 
 # 阶段 3 之后必跑的三件套:
+#   noleak 被跟踪的文件里没有本机绝对路径(防的是不可逆的信息泄露)
 #   equiv  自写 Qwen3 vs transformers,逐层对齐(结构判据)
 #   lora   自写 LoRA vs peft(数学判据)
 #   ppl    固定切片 next-token loss(端到端锚点)
-test: test-equiv test-lora test-tok test-retok test-ppl
+test: test-noleak test-equiv test-lora test-tok test-retok test-ppl
+
+# 被跟踪的文件里不许有本机绝对路径(会把用户名推到 GitHub / HF 上,
+# 而且 git 历史里删不掉)。放在最前面 —— 它几毫秒,而且拦的是不可逆的事故。
+test-noleak:
+	$(PY) $(HERE)test/test_no_local_paths.py
 
 # 分词器行为没变(需要先有基线,见 test/capture_baseline.py)
 test-tok:

@@ -119,7 +119,8 @@ this vocabulary; callers must send token ids.
 4. Phase 2: annealed on about 200M packed tokens with LoRA q/v adapters, Aurora,
    and tied embedding/head preservation.
 
-See `training_lineage.md` for the full reproduction record.
+The full reproduction record (data mix, hyperparameters, timings) lives in
+the GitHub repo under `docs/reports/`.
 
 ## Evaluation
 
@@ -331,27 +332,29 @@ def main() -> None:
     shutil.copy2(ROOT / "src" / "checkpoint.py", out / "checkpoint.py")
     write_text(out / "example_load.py", EXAMPLE_LOAD)
     write_text(out / "example_vllm.py", EXAMPLE_VLLM)
-    # lineage 报告开头有一段给**仓库内读者**的时效声明(讲 core/ evals/ 那些
-    # 目录改造后不存在了)。那段对只下模型的人没意义,拷进发布包反而突兀 ——
-    # 剥掉开头连续的引用块。
-    lineage = (ROOT / "docs" / "reports" / "v18_tie_lineage.md").read_text().split("\n")
-    kept, i = [], 0
-    # 保留一级标题
-    while i < len(lineage) and not lineage[i].startswith("#"):
-        i += 1
-    if i < len(lineage):
-        kept.append(lineage[i])
-        i += 1
-    # 跳过标题之后的空行 + 第一个引用块
-    while i < len(lineage) and not lineage[i].strip():
-        i += 1
-    while i < len(lineage) and lineage[i].startswith(">"):
-        i += 1
-    write_text(out / "training_lineage.md",
-               "\n".join(kept + lineage[i:]).lstrip("\n"))
+    # **不拷 lineage 报告。** 它记的是本机的复现路径(哪个目录、哪个脚本),
+    # 里面全是本机绝对路径 —— 那是本机信息,不该跟着模型发出去。复现记录留在
+    # 仓库的 docs/reports/v18_tie_lineage.md,模型卡给出仓库链接就够了。
     write_text(out / "README.md", MODEL_CARD.replace(DEFAULT_REPO_ID, args.repo_id))
     write_text(out / ".gitattributes", GITATTRIBUTES)
     write_text(out / "requirements.txt", REQUIREMENTS)
+
+    # **把不该在的文件清掉。** 发布目录是构建产物,不是攒东西的地方。
+    # 少了这一步,「不再生成某个文件」就等于「那个文件永远留在这儿」——
+    # 2026-07-27 就是这么把 training_lineage.md(整篇本机路径)又传到 HF 上的:
+    # export 已经不生成它了,但旧的那份还躺在目录里,upload 照传。
+    expected = ({dst for _, dst in FILES_TO_COPY} |
+                {"tokenizer.py", "model.py", "checkpoint.py",
+                 "example_load.py", "example_vllm.py",
+                 "README.md", ".gitattributes", "requirements.txt"})
+    for p in sorted(out.iterdir()):
+        if p.name in expected:
+            continue
+        if p.is_dir():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
+        print(f"  removed stale: {p.name}")
 
     print(f"Prepared HF upload directory: {out}")
     print("Excluded intermediate checkpoint-* directories.")

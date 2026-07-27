@@ -81,7 +81,48 @@ fi
 
 log "编译并安装 PieceTokenizer"
 command -v cmake >/dev/null || { echo "缺 cmake"; exit 1; }
-uv pip install --python "$PY" -e "$PIECE_REPO"
+
+# **必须是 editable 装法。** `prepare/tokenizer.py:resolve_assets()` 靠
+# `piece_tokenizer.__file__` 反查 clone 里的 save/ 找词表 —— 要是把 .so 拷进
+# site-packages,反查就断了,而 import 照样成功、只在读词表时才报错。
+#
+# pybind11 要装在目标 venv 里:上游 CMakeLists 是 `find_package(pybind11 REQUIRED)`,
+# 找不到就 CMake Error,而 setup.py 把它吞成一句「.so 不存在或不是普通文件」——
+# 看着像构建产物没生成,其实是缺依赖。
+uv pip install --python "$PY" pybind11 >/dev/null
+
+# 上游 setup.py 传的是 `-DPYTHON_EXECUTABLE`,**新版 CMake 的 FindPython 不认
+# 这个名字**(要 `Python_EXECUTABLE`),于是它去挑系统 python。系统 python 和
+# 目标 venv 同版本时撞对了、看不出来;不同版本就产出错 ABI tag 的 .so,
+# setuptools 找不到它要的那个名字,报错同样是「.so 不存在」。
+# 所以这里先试标准装法,ABI 不匹配就自己 cmake 再挂 .pth —— 等价于 editable。
+if ! uv pip install --python "$PY" --no-build-isolation -e "$PIECE_REPO" 2>/dev/null; then
+    ABI=$("$PY" -c 'import sysconfig;print(sysconfig.get_config_var("EXT_SUFFIX"))')
+    echo "  标准 editable 装法失败(大概是 CMake 挑了系统 python)"
+    echo "  改为手动 cmake,目标 ABI $ABI"
+    BUILD=$(mktemp -d)
+    cmake -S "$PIECE_REPO" -B "$BUILD" -DBUILD_PYTHON=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DPython_EXECUTABLE="$("$PY" -c 'import sys;print(sys.executable)')" \
+        -Dpybind11_DIR="$("$PY" -c 'import pybind11;print(pybind11.get_cmake_dir())')" \
+        -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$BUILD/out" >/dev/null
+    cmake --build "$BUILD" --target piece_tokenizer -j >/dev/null
+    [[ -f "$BUILD/out/piece_tokenizer$ABI" ]] || {
+        echo "  !! 还是没产出 piece_tokenizer$ABI —— 手动查 $BUILD"; exit 1; }
+    cp "$BUILD/out/piece_tokenizer$ABI" "$PIECE_REPO/"
+    # .pth 把 clone 加进 sys.path —— 与 editable 同效,resolve_assets() 能反查
+    SP=$("$PY" -c 'import site;print(site.getsitepackages()[0])')
+    echo "$PIECE_REPO" > "$SP/piece_tokenizer_clone.pth"
+    rm -rf "$BUILD"
+    echo "  装好了:$PIECE_REPO/piece_tokenizer$ABI + $SP/piece_tokenizer_clone.pth"
+fi
+
+# 反查必须真的通 —— 这是「装好了」的判据,import 成功不是。
+"$PY" -c "
+import sys; sys.path.insert(0, '$REPO_ROOT')
+from prepare.tokenizer import resolve_assets
+m, d = resolve_assets(); print(f'  反查词表 ok: {m}')" || {
+    echo "  !! import 成功但反查词表失败 —— 大概装成了非 editable"; exit 1; }
 
 log "确认词表文件在位"
 for f in Summer-Tokenizer.pt Summer-Tokenizer.dict.txt; do
