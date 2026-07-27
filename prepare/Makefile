@@ -5,8 +5,10 @@
 #
 #   make retok      词表手术:Qwen3-1.7B-Base → 换成 81903 piece 词表
 #   make encode     预编码语料:main 1B token + anneal 200M token
-#   make p1         Phase 1:冻结 transformer,只训 embed + lm_head
-#   make p2         Phase 2:LoRA tie-safe(v18 SOTA 的配方)
+#   make p1         Phase 1:冻结 transformer,只训 embed + lm_head(25 小时)
+#   make p2         Phase 2:LoRA tie-safe(v18 SOTA 的配方,5 小时)
+#
+#   24GB 卡上要降 batch:make p1 BATCH=4 ACCUM=64 / make p2 BATCH=4 ACCUM=32
 #
 #   make bench      mono 六任务(vLLM + lm_eval)
 #   make trans      WMT22 翻译 BLEU + COMET
@@ -51,6 +53,20 @@ P1        ?= $(OUT)/phase1
 P2        ?= $(OUT)/phase2
 CKPT      ?= $(OUT)/phase2_ckpt_v18_tie
 TAG       ?= dev
+
+# 每卡 batch 和梯度累积。**默认值就是 v18 的配方**(A6000 48GB 上训的)。
+# 24GB 的 4090 装不下 —— loss 里的 logits.float() 要 16×1023×81903×4 = 5.4GB。
+# 按等效 batch 不变换算即可:
+#     make p1 BATCH=4 ACCUM=64     # 4×64 = 256 = v18 的 16×16
+#     make p2 BATCH=4 ACCUM=32     # 4×32 = 128 = v18 的 16×8
+BATCH     ?= 16
+ACCUM_P1  ?= 16
+ACCUM_P2  ?= 8
+# 单独给 p1/p2 传 ACCUM 时覆盖上面两个
+ifdef ACCUM
+ACCUM_P1  := $(ACCUM)
+ACCUM_P2  := $(ACCUM)
+endif
 
 # 词表从 clone 的 PieceTokenizer 反查,本仓库不留副本
 PIECE     := $(shell $(PY) -c "import sys;sys.path.insert(0,'$(ROOT)');\
@@ -114,7 +130,8 @@ p1:
 	    --model_path $(INIT) --train_data $(MAIN_PT) --mode clm \
 	    --output_dir $(P1) \
 	    --freeze_transformer \
-	    --max_seq_length 1024 --batch_size 16 --gradient_accumulation_steps 16 \
+	    --max_seq_length 1024 --batch_size $(BATCH) \
+	    --gradient_accumulation_steps $(ACCUM_P1) \
 	    --gradient_checkpointing --compile \
 	    --max_steps 3815 --warmup_steps 250 \
 	    --adam_lr 1e-4 --min_lr_ratio 0.01 --lr_schedule cosine \
@@ -131,7 +148,8 @@ p2:
 	    --output_dir $(P2) \
 	    --use_lora --lora_r 16 --lora_alpha 32 --lora_target q_proj,v_proj \
 	    --lora_tie_embed_head \
-	    --max_seq_length 1024 --batch_size 16 --gradient_accumulation_steps 8 \
+	    --max_seq_length 1024 --batch_size $(BATCH) \
+	    --gradient_accumulation_steps $(ACCUM_P2) \
 	    --gradient_checkpointing --compile \
 	    --max_steps 1500 --warmup_steps 200 \
 	    --muon_lr 5e-5 --adam_lr 5e-5 --min_lr_ratio 0.01 --lr_schedule cosine \

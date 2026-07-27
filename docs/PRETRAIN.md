@@ -17,8 +17,29 @@ Hugging Face 和 GitHub,不依赖任何本机既有文件。
 | `make -C data download` | 数小时 | **100GB+** |
 | `make -C prepare retok` | ~10 分钟 | 3.2GB |
 | `make -C prepare encode` | 数小时 | 4.6GB(两段 `.pt`) |
-| `make -C prepare p1` | ~10 小时(3815 步) | 3.2GB |
-| `make -C prepare p2` | ~5 小时(1500 步) | 3.2GB |
+| `make -C prepare p1` | **25.1 小时**(3815 步,23.7 秒/步) | 3.2GB |
+| `make -C prepare p2` | **5.2 小时**(1500 步,12.4 秒/步) | 3.2GB |
+
+两阶段合计 **约 30.3 小时 / 1.2B token**。这两个数字来自 v18 的实际训练日志
+(`output/v18_p1_train.log` 的 90461 秒、`v18_p2_tie_train.log` 的 18645 秒),
+不是估的。
+
+## 显存:原配方要 48GB,4090 装不下
+
+`prepare/Makefile` 里的 p1 / p2 用 `--batch_size 16`,那是 v18 在 **A6000
+(48GB)** 上训的配方 —— **原样保留是因为它就是产出已发布权重的那份配方**。
+
+在 24GB 的 4090 上会 OOM。失败的分配约 5GB,正是 loss 里那个
+`logits.float()`:`16 × 1023 × 81903 × 4 字节 = 5.4GB`。
+
+按**等效 batch 不变**换算即可(v18 是 16×16=256):
+
+```bash
+make -C prepare p1 BATCH=4 ACCUM=64     # 4×64 = 256,与 v18 等效
+make -C prepare p2 BATCH=4 ACCUM=32     # 4×32 = 128,与 v18 的 16×8 等效
+```
+
+实测 4090 上 p1 约 27 秒/步、p2 约 14 秒/步 —— 比 A6000 慢一些,但跑得动。
 
 语料那 100GB 是**池子**,不是消耗量 —— 两段训练总共只吃 1.2B token。想省磁盘
 就调小 `data/source.py` 里的 `n_parts`,只要池子 ≥ 消耗量就行,区别只是采样
