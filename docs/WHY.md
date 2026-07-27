@@ -305,6 +305,17 @@ token,够喂满它 126M 的份额。`n_parts` 取的是池子规模(对齐当初
 教训:`uv pip install --dry-run <A>` 的结果**不代表** `install <A> <B>` 的结果。
 装之前先 `uv pip freeze` 存快照 —— 这次靠它做到了精确回滚。
 
+### 并发默认不写死
+
+`prepare/encode_corpus.py` 原来写死 `--num_workers 28` —— 那是 2× A6000 那台
+机器的核数。本机 16 核,28 个 spawn 进程各自加载分词器 + 预分配 numpy 数组,
+1B token 预算下能把 61GB 内存压满,**2026-07-27 实测把整台机器卡死过一次**。
+
+现在默认 `min(12, cpu_count() - 1)`。再多也只是抢内存,I/O 早就饱和了。
+
+同类的还有 `requirements.txt` —— 改造前根本没有这个文件,新用户不知道该装什么。
+现在分成两份(训练 / 评测),对应那两个 venv。
+
 ### 没有多卡代码路径
 
 本机一张 RTX 4090。旧脚本里的 `--nproc_per_node=2` 和 `--gpus 0 1` 是

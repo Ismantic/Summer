@@ -1,0 +1,18 @@
+# Summer 的评测依赖。**装在一个单独的 Python 3.11 venv 里**:
+#     uv venv --python 3.11 ~/.venv-eval
+#     uv pip install --python ~/.venv-eval/bin/python -r requirements-eval.txt
+#
+# 为什么不能和训练环境合并(试过,失败并完整回滚,见 docs/WHY.md 第五节):
+#   - vllm 没有可用的 cp314 构建
+#   - comet 的依赖链(torchmetrics 0.10.3)要 functools._HashedSeq,3.14 里没有
+#   - `uv pip install vllm unbabel-comet` 会把解拽回 vllm 0.2.5(2023 年底,
+#     不认识 Qwen3),并连带降级 numpy / pandas / pydantic
+#
+# 把这个 venv 的解释器路径写进 local.mk 的 PY_EVAL。
+
+torch>=2.6
+vllm>=0.21              # 所有生成和 loglikelihood 都走它 —— 与 transformers 版本解耦
+lm_eval>=0.4            # mono 六任务的 harness
+sacrebleu>=2.6          # BLEU,权威口径,不自己实现
+unbabel-comet>=2.2      # COMET,比 BLEU 可靠(见 WHY.md 第二节)
+transformers>=4.56      # vllm 和 lm_eval 要它;评测本身不直接用

@@ -1,0 +1,25 @@
+# Summer 的 Python 依赖(训练侧)。装法:
+#     uv pip install -r requirements.txt
+#
+# **评测另装。** vllm 和 comet 上不了 Python 3.14,得单开一个 3.11 的 venv:
+#     uv pip install -r requirements-eval.txt
+# 为什么合并不了见 docs/WHY.md 第五节(试过,失败并完整回滚)。
+#
+# C++ 依赖(PieceTokenizer)不在这里 —— 它要 clone 加编译,由 `make deps` 装,
+# 见 prepare/install_deps.sh。81903 词表和中文分词词典也在那个仓库里。
+
+# --- 模型与训练(src/)-------------------------------------------------------
+# src/ 只依赖 torch。Qwen3 的 forward、LoRA、safetensors 读写、Muon/Aurora
+# 都是自己实现的,所以这一节就一行。
+torch>=2.6
+
+# --- 数据获取(data/)-------------------------------------------------------
+huggingface_hub>=0.30      # 按 data/source.py 的注册表下载
+datasets>=3.0              # data/prefetch_eval_datasets.py 拉 benchmark 数据集
+
+# --- 预编码与词表手术(prepare/)-------------------------------------------
+numpy>=1.26
+pyarrow>=15                # 流式读 parquet 语料
+tqdm>=4.66
+transformers>=4.56         # 只有 prepare/retok.py 用 —— 要读 Qwen 原生 BBPE
+                           # 来做嵌入映射。src/ 不需要它。

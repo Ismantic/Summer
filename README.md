@@ -116,6 +116,13 @@ argmax **100% 一致**;与 peft 对拍 logits **逐位相同**。
   `make deps` 自动 clone 并编译。**81903 词表和中文分词词典都在它仓库里,
   本仓库不留副本。**
 
+装依赖:
+
+```bash
+uv pip install -r requirements.txt                    # 训练侧(3.14)
+uv pip install -r requirements-eval.txt               # 评测侧(单独的 3.11 venv)
+```
+
 语料、词表、基座权重全部从 Hugging Face 和 GitHub 获取,不需要任何本机既有
 文件。唯一的手动步骤:`BAAI/CCI3-HQ` 是 gated 数据集,要先在 HF 页面接受条款
 并 `huggingface-cli login`。

@@ -166,7 +166,15 @@ def main():
     p.add_argument("--seq_length", type=int, default=1024)
     p.add_argument("--max_line_chars", type=int, default=100_000)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--num_workers", type=int, default=28)
+    # 默认跟着 CPU 核数走,不写死。
+    #
+    # **原来写死 28,那是 2× A6000 那台机器的核数。** 本机 16 核,28 个 spawn
+    # 进程各自加载分词器 + 预分配 numpy 数组,1B token 预算下能把 61GB 内存
+    # 压满 —— 2026-07-27 实测把整台机器卡死过一次。
+    #
+    # 留一核给系统,再压 12 个上限:再多也只是抢内存,I/O 早就饱和了。
+    p.add_argument("--num_workers", type=int,
+                   default=min(12, max(1, (os.cpu_count() or 4) - 1)))
     args = p.parse_args()
 
     weights = MAIN_WEIGHTS if args.mix == "main" else ANNEAL_WEIGHTS
