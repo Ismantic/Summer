@@ -172,14 +172,18 @@ make -C save export      # 导出干净的 HF 上传目录
 make -C save verify      # 上传后核对 sha256
 ```
 
-发布包里 **`dict.txt` 必须带** —— 少了它中文的 token id 会变,而下载的人
-不会发现(round-trip 照样正确)。
+发布包里 **`Summer-Tokenizer.dict.txt` 必须带** —— 少了它中文的 token id
+会变,而下载的人不会发现(round-trip 照样正确)。
+
+发布包**自足**:带 `model.py` / `checkpoint.py` / `tokenizer.py`,所以下载的人
+只要 `torch` + `PieceTokenizer`,不需要 transformers 也不需要 safetensors 库。
 
 ## 出了问题先查
 
 `WHY.md` 第一节列了所有「改错了不报错」的地方。最常见的三个:
 
 1. loss 明显偏高但不报错 → 查 RoPE 是不是被 autocast 降精度了
-2. 中文效果异常 → 查 `dict.txt` 在不在
+2. 中文效果异常 → 查中文分词词典在不在(`Summer-Tokenizer.dict.txt`,
+   旧 ckpt 里叫 `dict.txt`)
 3. 权重像是没加载 → 查 state_dict 的 key,`from_pretrained` 会报错但
    `load_state_dict(strict=False)` 不会

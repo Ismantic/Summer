@@ -46,8 +46,11 @@ save/       导出 HF 发布包 + 上传 + 核对
   **不要把路径写回 Makefile**,那样别的机器就跑不了。
 - GPU:单张 RTX 4090(24GB,bf16)。**没有多卡代码路径。**
 - C++ 依赖:`make deps` clone 并编译 PieceTokenizer。
-  **81903 词表和 dict.txt 都在它仓库的 `save/` 下,本仓库不留副本** ——
-  用 `prepare.tokenizer.resolve_assets()` 反查。
+  **词表在它仓库的 `save/` 下,本仓库不留副本** ——
+  `Summer-Tokenizer.pt` + `Summer-Tokenizer.dict.txt`,用
+  `prepare.tokenizer.resolve_assets()` 反查。**产出也用同名** —— 这样从任何
+  checkpoint 都能看出词表出自哪里。旧名 `piece.model` / `dict.txt` 在
+  `has_piece_vocab()` 里保留为回退(v18 的 ckpt 是旧名)。
 
 ## 不能改错的地方
 
@@ -59,7 +62,7 @@ save/       导出 HF 发布包 + 上传 + 核对
 - **RoPE 的 `inv_freq @ position_ids` 必须强制 float32。** 被 autocast 降到
   bf16 的话整数过 256 就不精确(1023→1024),位置编码错乱。实测代价:
   seq 1024 上 loss 从 2.3331 涨到 2.7605。
-- **`dict.txt` 是必需的。** 少了它中文的 token id 会变(不只是慢),而
+- **中文分词词典是必需的。** 少了它中文的 token id 会变(不只是慢),而
   round-trip 照样正确 —— 看不出来。`prepare/tokenizer.py` 现在直接报错。
 - **tie 的 checkpoint 里没有 `lm_head.weight`。** 310 个张量,加载时绑回 embed。
 - **重建 PieceTokenizer 之前先 `python test/capture_baseline.py` 抓基线。**
