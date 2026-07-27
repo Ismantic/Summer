@@ -27,8 +27,16 @@ from src.lora import (adapter_state_dict, apply_lora, count_lora_params,   # noq
                       load_adapter, merge_lora)
 from src.model import Qwen3ForCausalLM                                     # noqa: E402
 
-CKPT = ROOT / "output" / "phase2_ckpt_v18_tie"
-ADAPTER_DIR = CKPT / "checkpoint-1500"
+# 基座:任何同架构的 checkpoint 都行 —— 这个测试验的是 LoRA 的数学,
+# 不是某个特定权重。新 clone 上通常是从 HF 下的发布包。
+CKPT_CANDIDATES = [
+    ROOT / "output" / "phase2_ckpt_v18_tie",
+    ROOT / "data" / "downloads" / "Qwen3-1.7B-Base-ReTok",
+    ROOT / "output" / "Qwen3-1.7B-Base-ReTok",
+]
+# v18 那份 peft 训出来的 adapter。**发布包里没有**(只有合并后的权重),
+# 所以新 clone 上不存在 —— 有就多测一轮互通性,没有就跳过那一项。
+ADAPTER_DIR = ROOT / "output" / "phase2_ckpt_v18_tie" / "checkpoint-1500"
 FIXTURE = ROOT / "test" / "fixtures" / "ppl_slice.pt"
 
 R, ALPHA, TARGETS = 16, 32, ("q_proj", "v_proj")
@@ -41,10 +49,20 @@ def rel_err(a, b):
     return ((a - b).abs().mean() / b.abs().mean().clamp(min=1e-6)).item()
 
 
+def resolve_ckpt():
+    for c in CKPT_CANDIDATES:
+        if (c / "config.json").exists():
+            return c
+    return None
+
+
 def main() -> int:
-    if not (ADAPTER_DIR / "adapter_model.safetensors").exists():
-        print(f"跳过:{ADAPTER_DIR} 下没有 adapter_model.safetensors")
+    CKPT = resolve_ckpt()
+    if CKPT is None:
+        print("跳过:找不到任何同架构 checkpoint。先跑\n"
+              "  make -C data download-retok_model")
         return 0
+    print(f"基座 {CKPT}")
 
     ids = (torch.load(FIXTURE, weights_only=True)[:1, :64].long()
            if FIXTURE.exists() else torch.randint(0, 81903, (1, 64)))
@@ -66,10 +84,19 @@ def main() -> int:
     ok &= same
     print(f"  B 零初始化 → 与基座逐位相同  {'ok' if same else '**不符**'}")
 
-    load_adapter(mine, ADAPTER_DIR / "adapter_model.safetensors")
+    # 给 B 灌一份随机值 —— 零初始化下 LoRA 分支恒等于 0,那样对拍等于什么都没测。
+    # 用自己生成的 adapter 而不是 v18 那份:发布包里没有 adapter,新 clone 上
+    # 拿不到,而 LoRA 的数学不依赖某个特定权重。
+    import torch as _t
+    _g = _t.Generator().manual_seed(0)
+    with _t.no_grad():
+        for m in mine.modules():
+            if type(m).__name__ == "LoRALinear":
+                m.lora_B.copy_(_t.randn(m.lora_B.shape, generator=_g) * 0.02)
     with torch.no_grad():
         mine_out = mine(ids).clone()
-    print(f"  加载 adapter 后与基座的相对差异 {rel_err(mine_out, base_out):.3e}")
+    print(f"  B 灌随机值后与基座的相对差异 {rel_err(mine_out, base_out):.3e}"
+          f"  (应明显非零)")
 
     n_keys = len(adapter_state_dict(mine))
     print(f"  导出 {n_keys} 个 key(peft 那份是 112 个)  "
@@ -85,9 +112,28 @@ def main() -> int:
         print("\n" + ("自查通过(未与 peft 对拍)" if ok else "自查失败"))
         return 0 if ok else 1
 
+    # 把自写实现的 adapter 导出成 peft 格式,让 peft 读进来 —— 验的是
+    # 「我们写的 adapter peft 能用」这个方向,也是发布/互通真正要紧的方向。
+    import json
+    import tempfile
+
+    from src.checkpoint import save_safetensors
+
+    tmp = tempfile.mkdtemp(prefix="lora_interop_")
+    save_safetensors(adapter_state_dict(mine),
+                     Path(tmp) / "adapter_model.safetensors",
+                     metadata={"format": "pt"})
+    (Path(tmp) / "adapter_config.json").write_text(json.dumps({
+        "peft_type": "LORA", "task_type": "CAUSAL_LM",
+        "base_model_name_or_path": str(CKPT),
+        "r": R, "lora_alpha": ALPHA, "lora_dropout": 0.0, "bias": "none",
+        "target_modules": list(TARGETS), "modules_to_save": [],
+        "inference_mode": True,
+    }))
+
     ref = AutoModelForCausalLM.from_pretrained(
         CKPT, dtype=torch.float32, trust_remote_code=True).eval()
-    ref = PeftModel.from_pretrained(ref, str(ADAPTER_DIR)).eval()
+    ref = PeftModel.from_pretrained(ref, tmp).eval()
     with torch.no_grad():
         ref_out = ref(input_ids=ids).logits
 
