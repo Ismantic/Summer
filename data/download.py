@@ -31,6 +31,22 @@ SAVED_PROXY = {k: v for k, v in os.environ.items() if "proxy" in k.lower()}
 for _k in SAVED_PROXY:
     del os.environ[_k]
 
+# **用镜像就必须关掉 xet,否则镜像等于没用。**
+#
+# xet 是 HF 新的分块传输后端。它只从 HF 官方的 `cas-bridge.xethub.hf.co` 取
+# 数据块 —— `HF_ENDPOINT` 只影响元数据请求,blob 该走 xet 还是走 xet。于是
+# 镜像被绕过,而且这条链路还刚好是最慢的。
+#
+# 2026-07-27 实测(同一批文件,同一台机器):
+#
+#     开 xet    0.5 MB/s   —— 还伴随 cas-bridge 的 Read timed out
+#     关 xet  117   MB/s   —— 234 倍
+#
+# 这个差别不会报错,只表现为「下载特别慢」——213GB 按 0.5MB/s 要跑 5 天。
+# 走官方源(`--endpoint ""`)时不关,那种情况下 xet 是真的更快。
+if "hf-mirror.com" in os.environ.get("HF_ENDPOINT", source.HF_ENDPOINT):
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 
 def _glob_to_re(pat: str) -> re.Pattern:
     """glob → regex。`*` 不跨 `/`,`**` 跨 `/`。"""

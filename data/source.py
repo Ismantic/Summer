@@ -124,9 +124,11 @@ PRETRAIN_SOURCES = {
     # ---------------- EN ----------------
     "FineWebEdu": Source(
         name="FineWebEdu", kind="hf", repo_id="HuggingFaceFW/fineweb-edu",
-        subdir="fineweb-edu", part_glob="sample/10BT/*.parquet", n_parts=20,
+        subdir="fineweb-edu", part_glob="sample/10BT/*.parquet", n_parts=None,
         allow_patterns=["sample/10BT/*.parquet"], lang="en",
-        note="英文教育向网页。只用 sample/10BT 子集(全量 3038 文件)。"
+        note="英文教育向网页。只用 sample/10BT 子集 —— **它总共就 14 个文件 / "
+             "28.5GB**,不是被截断了。原来写 n_parts=20,于是 status 永远显示"
+             "「14/20」,看着像缺文件。仓库全量是 113 个 CC-MAIN-* 目录。"
              "v18 读的是转成 jsonl 的 sample-10bt-*.json。",
     ),
     "Wikipedia_EN": Source(
