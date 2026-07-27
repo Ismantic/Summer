@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = ROOT / "output" / "phase2_ckpt_v18_tie"
-DEFAULT_OUT = ROOT / "hf_upload" / "Qwen3-1.7B-Base-ReTok"
+DEFAULT_OUT = ROOT / "save" / "releases" / "Qwen3-1.7B-Base-ReTok"
 DEFAULT_REPO_ID = "Ismantic/Qwen3-1.7B-Base-ReTok"
 
 MODEL_CARD = """---
@@ -36,8 +36,15 @@ Qwen3-1.7B-Base-ReTok is a tokenizer-replaced and continued-pretrained variant
 of `Qwen/Qwen3-1.7B-Base`. The original Qwen tokenizer was replaced with a
 custom Piece tokenizer, then the model was recovered with continued pretraining.
 
-This is the final tie-preserving v18 checkpoint from the Summer/ReTok
-experiments: `phase2_ckpt_v18_tie`.
+This is the final tie-preserving v18 checkpoint from the
+[**Summer**](https://github.com/Ismantic/Summer) project.
+
+| | |
+|---|---|
+| Code, recipes, full reproduction | https://github.com/Ismantic/Summer |
+| Design notes and known pitfalls | [`docs/WHY.md`](https://github.com/Ismantic/Summer/blob/main/docs/WHY.md) |
+| Tokenizer (C++, ships the 81,903 vocab) | https://github.com/Ismantic/PieceTokenizer |
+| Downstream translation models | https://github.com/Ismantic/Interpreter |
 
 Hugging Face repo id: `Ismantic/Qwen3-1.7B-Base-ReTok`
 
@@ -45,14 +52,25 @@ Hugging Face repo id: `Ismantic/Qwen3-1.7B-Base-ReTok`
 
 This repository contains the custom tokenizer assets:
 
-- `piece.model`
-- `dict.txt`
-- `token_mapping.json`
-- `tokenizer_wrapper.py`
+- `piece.model` — the 81,903-piece vocabulary
+- `dict.txt` — **Chinese segmentation dictionary. Not optional.**
+- `token_mapping.json` — pad / bos / eos ids
+- `tokenizer_wrapper.py` — the loader you should use
 
-The model architecture can be loaded by Transformers as Qwen3, but the tokenizer
-is not a standard Qwen tokenizer. For generation, encode prompts with the
-provided Piece tokenizer wrapper or the Summer/ReTok evaluation scripts.
+The model architecture loads through Transformers as Qwen3, but **the tokenizer
+is not a standard Qwen tokenizer and `AutoTokenizer` will not work.** Use the
+bundled wrapper:
+
+```python
+from tokenizer_wrapper import PieceTokenizerWrapper
+tok = PieceTokenizerWrapper(".")          # the directory holding these files
+ids = tok.encode("中国科学院计算技术研究所在北京")
+```
+
+**Keep `dict.txt` next to `piece.model`.** Without it Chinese text tokenizes to
+*different ids* — not just slower. Round-trip decoding still returns the original
+string, so the breakage is silent; the model simply receives input it was never
+trained on. The wrapper raises rather than falling back.
 
 ## Training Summary
 
@@ -113,23 +131,71 @@ GITATTRIBUTES = """*.bin filter=lfs diff=lfs merge=lfs -text
 """
 
 
-REQUIREMENTS = """torch
-transformers>=4.56.0
-safetensors
-protobuf
+# 发布包**只**要这两个。模型 forward、safetensors 读取都在随包的 model.py /
+# checkpoint.py 里 —— 不需要 transformers,也不需要 safetensors 库。
+REQUIREMENTS = """torch>=2.6
+# 分词器(C++,同时提供 81903 词表):
+#   pip install git+https://github.com/Ismantic/PieceTokenizer
 """
 
 
+EXAMPLE_LOAD = '''"""跑通这个发布包 —— 只需要 torch 和 piece_tokenizer。
+
+    pip install torch
+    pip install git+https://github.com/Ismantic/PieceTokenizer
+    python example_load.py
+"""
+import torch
+
+from model import Qwen3ForCausalLM
+from tokenizer import PieceTokenizerWrapper
+
+HERE = "."
+
+tok = PieceTokenizerWrapper(HERE)
+model = Qwen3ForCausalLM.from_pretrained(
+    HERE, device="cuda" if torch.cuda.is_available() else "cpu",
+    dtype=torch.bfloat16)
+
+prompt = "中国科学院计算技术研究所"
+ids = tok.encode(prompt, add_special_tokens=False)
+print(f"{prompt!r} -> {len(ids)} tokens")
+
+# 贪心续写 40 步。没有 KV cache —— 每步重算前缀,短续写够用。
+x = torch.tensor([ids], device=next(model.parameters()).device)
+out = []
+with torch.no_grad():
+    for _ in range(40):
+        nxt = int(model(x)[0, -1].argmax())
+        if nxt == tok.eos_token_id:
+            break
+        out.append(nxt)
+        x = torch.cat([x, torch.tensor([[nxt]], device=x.device)], dim=1)
+
+print(prompt + tok.decode(out))
+'''
+
+
+# 发布包里的文件名。**词表用上游名** —— 与 PieceTokenizer 仓库 save/ 下同名,
+# 这样拿到发布包的人一眼就知道词表出自哪里(BERTc 的发布包里就叫
+# BERTc-Tokenizer.pt)。源 checkpoint 里可能是旧名,所以按 (源名候选, 目标名) 写。
 FILES_TO_COPY = [
-    "config.json",
-    "generation_config.json",
-    "model.safetensors",
-    "piece.model",
-    "dict.txt",
-    "token_mapping.json",
-    "tokenizer_config.json",
-    "special_tokens_map.json",
+    ("config.json", "config.json"),
+    ("generation_config.json", "generation_config.json"),
+    ("model.safetensors", "model.safetensors"),
+    (("Summer-Tokenizer.pt", "piece.model"), "Summer-Tokenizer.pt"),
+    (("Summer-Tokenizer.dict.txt", "dict.txt"), "Summer-Tokenizer.dict.txt"),
+    ("token_mapping.json", "token_mapping.json"),
+    ("tokenizer_config.json", "tokenizer_config.json"),
+    ("special_tokens_map.json", "special_tokens_map.json"),
 ]
+
+
+def _pick(source, names):
+    for n in (names if isinstance(names, tuple) else (names,)):
+        if (source / n).exists():
+            return source / n
+    return None
 
 
 def link_or_copy(src: Path, dst: Path, copy: bool) -> None:
@@ -161,15 +227,23 @@ def main() -> None:
     if not source.exists():
         raise FileNotFoundError(source)
 
-    missing = [name for name in FILES_TO_COPY if not (source / name).exists()]
+    missing = [dst for src_names, dst in FILES_TO_COPY
+               if _pick(source, src_names) is None]
     if missing:
         raise FileNotFoundError(f"Missing required files in {source}: {missing}")
 
     out.mkdir(parents=True, exist_ok=True)
-    for name in FILES_TO_COPY:
-        link_or_copy(source / name, out / name, args.copy)
+    for src_names, dst in FILES_TO_COPY:
+        link_or_copy(_pick(source, src_names), out / dst, args.copy)
 
-    shutil.copy2(ROOT / "prepare" / "tokenizer.py", out / "tokenizer_wrapper.py")
+    # **把模型代码一起带上** —— 发布包只依赖 torch + piece_tokenizer,
+    # 用户不需要 transformers 也不需要 safetensors 库。BERTc 的发布包一直如此。
+    # 文件名保持源文件的名字(tokenizer.py / model.py / checkpoint.py),
+    # 不加 _wrapper 之类的后缀 —— 那是实现细节,对拿到包的人没意义。
+    shutil.copy2(ROOT / "prepare" / "tokenizer.py", out / "tokenizer.py")
+    shutil.copy2(ROOT / "src" / "model.py", out / "model.py")
+    shutil.copy2(ROOT / "src" / "checkpoint.py", out / "checkpoint.py")
+    write_text(out / "example_load.py", EXAMPLE_LOAD)
     # lineage 报告开头有一段给**仓库内读者**的时效声明(讲 core/ evals/ 那些
     # 目录改造后不存在了)。那段对只下模型的人没意义,拷进发布包反而突兀 ——
     # 剥掉开头连续的引用块。

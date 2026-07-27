@@ -39,7 +39,7 @@ round-trip 照样正确、不报错 —— 下载的人不会发现。见 `docs/
 huggingface-cli login
 huggingface-cli repo create Ismantic/Qwen3-1.7B-Base-ReTok --type model
 huggingface-cli upload Ismantic/Qwen3-1.7B-Base-ReTok \
-    hf_upload/Qwen3-1.7B-Base-ReTok . --repo-type model
+    save/releases/Qwen3-1.7B-Base-ReTok . --repo-type model
 ```
 
 `repo create` 推断不出组织的话,去 HF 网页在 `Ismantic` 下建好,再跑同样的

@@ -295,6 +295,41 @@ token,够喂满它 126M 的份额。`n_parts` 取的是池子规模(对齐当初
 
 ## 五、结构与依赖
 
+### vLLM 为什么能加载纯 torch 训出来的权重
+
+**vLLM 根本不用我们的代码。** 它有自己的 Qwen3 实现,认模型靠读 `config.json`
+里的 `architectures: ["Qwen3ForCausalLM"]` / `model_type: qwen3`,然后按
+**state_dict 的 key 名**把权重灌进去。
+
+所以「`src/` 自己实现模型」和「用 vLLM 评测」不冲突 —— 两边共享的是**权重文件
+和 key 命名**,不是代码。这就是那条红线的由来:
+
+> `src/model.py` 的 state_dict key 必须与 HF 的 `Qwen3ForCausalLM` 一致
+
+key 是我们与 vLLM / transformers 之间**唯一的契约**。改了它,vLLM 会静默地灌
+不进去或灌错 —— 而且照样跑出数字。
+
+推论:**`trans` 和 `mono` 走 vLLM,所以测不到 `src/model.py`。** 能锚住自写
+模型的只有 `test_model_equiv.py` 和 `--only ppl`。
+
+分词器是 vLLM 唯一处理不了的部分(它认不了 piece 词表),所以评测时传
+`skip_tokenizer_init=True`,由 `prepare/translate.py` 自己编码好 id 再用
+`TokensPrompt(prompt_token_ids=...)` 喂进去。
+
+### 发布包自足:只要 torch + PieceTokenizer
+
+发布包里带模型代码(`model.py` / `checkpoint.py` / `tokenizer.py` /
+`example_load.py`),所以**下载的人不需要 transformers,也不需要 safetensors
+库**。BERTc 的发布包一直是这个做法。
+
+2026-07-27 用 import hook 屏蔽 `transformers` / `safetensors` / `peft` 实测过:
+加载、分词、前向全部跑通,1,577,147,392 参数。
+
+词表文件用**上游名** `Summer-Tokenizer.pt` / `Summer-Tokenizer.dict.txt` ——
+与 PieceTokenizer 仓库 `save/` 下同名,拿到发布包的人一眼就知道词表出自哪里,
+不用靠 sha256 反推。旧名 `piece.model` / `dict.txt` 在 `prepare/tokenizer.py`
+里保留为回退,因为已发布的模型和 v18 的 checkpoint 都在用。
+
 ### `src/` 只依赖 torch
 
 模型、LoRA、优化器、safetensors 读写都是自己实现的。这条约束的意义是让读者

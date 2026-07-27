@@ -105,7 +105,14 @@ def write_tokenizer_files(args, special_token_ids, output_path):
         json.dump(special_tokens_map, f, indent=2, ensure_ascii=False)
 
     import shutil
-    shutil.copy2(args.new_tokenizer_path, os.path.join(output_path, "piece.model"))
+    import sys as _s
+    _s.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from prepare.tokenizer import PIECE_DICT_NAME, PIECE_MODEL_NAME
+
+    # 产出用**上游名**(与 PieceTokenizer 仓库 save/ 下同名)—— 这样从任何
+    # checkpoint 都能一眼看出词表出自哪里,不用靠 sha256 反推。BERTc 一直如此。
+    shutil.copy2(args.new_tokenizer_path,
+                 os.path.join(output_path, PIECE_MODEL_NAME))
 
     # **dict.txt 必须一起拷。** 少了它中文的 token id 会变(不只是慢),而且
     # round-trip 照样正确、看不出来。手术产物缺 dict 的话,后面 p1 加载它时
@@ -117,9 +124,10 @@ def write_tokenizer_files(args, special_token_ids, output_path):
         _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from prepare.tokenizer import resolve_assets
         _, cn_dict = resolve_assets()
-    shutil.copy2(cn_dict, os.path.join(output_path, "dict.txt"))
+    shutil.copy2(cn_dict, os.path.join(output_path, PIECE_DICT_NAME))
     print(f"Saved tokenizer files to {output_path}")
-    print(f"  dict.txt <- {cn_dict}")
+    print(f"  {PIECE_MODEL_NAME} <- {args.new_tokenizer_path}")
+    print(f"  {PIECE_DICT_NAME} <- {cn_dict}")
 
 
 def lookup_id(old_tokenizer, piece):

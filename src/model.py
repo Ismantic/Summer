@@ -41,6 +41,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+
+def _checkpoint_mod():
+    """`src.checkpoint`,或发布包里平铺的 `checkpoint`。
+
+    发布包(save/releases/<repo>/)是平铺的 —— model.py 和 checkpoint.py 并列,
+    没有包结构,相对 import 会 ImportError。所以两种都试。
+    """
+    try:
+        from . import checkpoint as _c            # 仓库内:src 是 package
+    except ImportError:                            # 发布包内:平铺
+        import checkpoint as _c                    # noqa: I001
+    return _c
+
+
 @dataclass
 class Qwen3Config:
     vocab_size: int = 81903
@@ -251,7 +265,7 @@ class Qwen3ForCausalLM(nn.Module):
         """
         import dataclasses
 
-        from .checkpoint import save_safetensors
+        save_safetensors = _checkpoint_mod().save_safetensors
 
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -265,7 +279,7 @@ class Qwen3ForCausalLM(nn.Module):
     @classmethod
     def from_pretrained(cls, model_dir, device="cpu", dtype=None):
         """从 HF 格式的目录加载。key 对不上就报错,不静默跳过。"""
-        from .checkpoint import load_sharded
+        load_sharded = _checkpoint_mod().load_sharded
 
         model_dir = Path(model_dir)
         cfg = Qwen3Config.from_json(model_dir / "config.json")

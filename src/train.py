@@ -35,7 +35,11 @@ def _copy_tokenizer_artifacts(src_dir, dst_dir):
     只是拷文件,不加载也不使用分词器 —— 不违反「src/ 不碰文本」。
     """
     import shutil
-    artifacts = ["piece.model", "dict.txt", "token_mapping.json",
+    # 上游名 + 旧名都列上:从哪个 checkpoint 继续训就带哪一套。
+    # 上游名(Summer-Tokenizer.*)与 PieceTokenizer 仓库 save/ 下同名;
+    # piece.model / dict.txt 是改造前的名字,v18 的 ckpt 和已发布模型在用。
+    artifacts = ["Summer-Tokenizer.pt", "Summer-Tokenizer.dict.txt",
+                 "piece.model", "dict.txt", "token_mapping.json",
                  "tokenizer_config.json", "special_tokens_map.json"]
     for name in artifacts:
         src = os.path.join(src_dir, name)

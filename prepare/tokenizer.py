@@ -39,7 +39,15 @@ def resolve_assets():
 
     本仓库不留副本,所以要经 `piece_tokenizer.__file__` 找到 clone 的仓库根,
     再取 `save/` 下那两个文件。找不到就报错 —— 报错好过静默用错词表。
+
+    `SUMMER_PIECE_MODEL` / `SUMMER_PIECE_DICT` 可以覆盖(与 BERTc 的
+    `BERTC_PIECE_MODEL` 同一套做法)。
     """
+    env_m = os.environ.get("SUMMER_PIECE_MODEL")
+    env_d = os.environ.get("SUMMER_PIECE_DICT")
+    if env_m and env_d:
+        return env_m, env_d
+
     root = os.path.dirname(os.path.abspath(pt.__file__))
     tried = []
     for cand in (root, os.path.dirname(root)):
@@ -54,29 +62,55 @@ def resolve_assets():
         f"  先跑 `bash prepare/install_deps.sh` clone 并安装 PieceTokenizer。")
 
 
+# checkpoint 目录里词表文件的名字。**上游名优先。**
+#
+# `Summer-Tokenizer.pt` / `.dict.txt` 与 PieceTokenizer 仓库 `save/` 下的文件
+# 同名 —— 这样从任何一个 checkpoint 都能一眼看出词表出自哪里,不用靠 sha256
+# 去反推(BERTc 一直是这么做的,它的发布包里就叫 `BERTc-Tokenizer.pt`)。
+#
+# `piece.model` / `dict.txt` 是改造之前的名字。已发布的
+# `Ismantic/Qwen3-1.7B-Base-ReTok` 和 v18 的 checkpoint 用的都是旧名,所以
+# **保留为回退**,不然那些目录一个都加载不了。新产出统一用上游名。
+_MODEL_NAMES = (PIECE_MODEL_NAME, "piece.model", "piece_mt.model")
+_DICT_NAMES = (PIECE_DICT_NAME, "dict.txt")
+
+
+def _first_in(model_dir, names):
+    for n in names:
+        p = os.path.join(model_dir, n)
+        if os.path.exists(p):
+            return p
+    return None
+
+
 class PieceTokenizerWrapper:
     def __init__(self, model_dir, require_dict=True):
-        """从模型目录加载(需含 piece.model / dict.txt / token_mapping.json)。"""
+        """从模型目录加载。
+
+        词表文件按 `_MODEL_NAMES` / `_DICT_NAMES` 的顺序找 —— 上游名优先,
+        旧名回退。
+        """
         self._tok = pt.Tokenizer()
 
-        # Find the .model file
-        model_file = os.path.join(model_dir, "piece.model")
-        if not os.path.exists(model_file):
-            model_file = os.path.join(model_dir, "piece_mt.model")
-        if not os.path.exists(model_file):
-            raise FileNotFoundError(f"No piece model found in {model_dir}")
+        model_file = _first_in(model_dir, _MODEL_NAMES)
+        if model_file is None:
+            raise FileNotFoundError(
+                f"{model_dir} 里找不到词表。试过:{list(_MODEL_NAMES)}")
 
-        cn_dict = os.path.join(model_dir, "dict.txt")
-        if os.path.exists(cn_dict):
+        cn_dict = _first_in(model_dir, _DICT_NAMES)
+        if cn_dict is not None:
             self._tok.load(model_file, cn_dict)
         elif require_dict:
             raise FileNotFoundError(
-                f"{model_dir} 里没有 dict.txt。缺了它中文的 token id 会变"
-                f"(不只是慢),而且 decode 照样能还原原文、不会报错。\n"
-                f"  从 checkpoint 或 deps/PieceTokenizer/save/{PIECE_DICT_NAME} "
+                f"{model_dir} 里没有中文分词词典(试过 {list(_DICT_NAMES)})。"
+                f"缺了它中文的 token id 会变(不只是慢),而且 decode 照样能"
+                f"还原原文、不会报错。\n"
+                f"  从 checkpoint 或 PieceTokenizer 的 save/{PIECE_DICT_NAME} "
                 f"拷一份过来;确实不需要就传 require_dict=False。")
         else:
             self._tok.load(model_file)
+        self.piece_model_path = model_file
+        self.cn_dict_path = cn_dict
 
         # Load token mapping
         mapping_file = os.path.join(model_dir, "token_mapping.json")

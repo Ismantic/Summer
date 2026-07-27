@@ -220,7 +220,7 @@ __marimo__/
 # Project-specific
 eval_results/
 output/
-hf_upload/
+save/releases/
 *.pt
 # 回归测试的固定切片必须进版本库 —— 少了它 test_reproduce_sota
 # 的 ppl 那项会静默跳过(而不是失败),等于没有防线。

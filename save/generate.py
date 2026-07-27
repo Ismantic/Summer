@@ -25,7 +25,7 @@ from src.model import Qwen3ForCausalLM                             # noqa: E402
 
 def resolve_ckpt() -> Path | None:
     for c in ("save/sota/v18_p2_tie", "output/phase2_ckpt_v18_tie",
-              "hf_upload/Qwen3-1.7B-Base-ReTok"):
+              "save/releases/Qwen3-1.7B-Base-ReTok"):
         if (ROOT / c / "config.json").exists():
             return ROOT / c
     return None
@@ -70,7 +70,7 @@ def main() -> int:
     if ckpt is None or not (ckpt / "config.json").exists():
         print("找不到模型目录。传 --model_path,或从 HF 下:")
         print("  huggingface-cli download Ismantic/Qwen3-1.7B-Base-ReTok "
-              "--local-dir hf_upload/Qwen3-1.7B-Base-ReTok")
+              "--local-dir save/releases/Qwen3-1.7B-Base-ReTok")
         return 1
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
