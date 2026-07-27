@@ -100,6 +100,10 @@ TOL_LOSS = 0.005
 
 SKIPPED = -1     # 缺输入而没跑。绝不能和「跑了且通过」混为一谈
 
+# 哪些项因为缺输入而没跑。**全都跳过时收尾必须说「什么都没测」** ——
+# 否则新 clone 上会看到「全部通过」而其实一项没跑,那比失败更糟。
+_SKIPPED: list[str] = []
+
 TRANS_ARGS = dict(testset="wmt22", exemplar_set="wmt21", num_fewshot=5,
                   max_samples=1000)
 MONO_TASKS = "lambada_openai:0,piqa:5,arc_challenge:25,hellaswag:10,ceval-valid:5,gsm8k:5"
@@ -121,6 +125,9 @@ def resolve_ckpt() -> Path | None:
     return first_existing(
         ROOT / "save" / "sota" / "v18_p2_tie",
         ROOT / "output" / "phase2_ckpt_v18_tie",
+        # 从 HF 下的发布包 —— 新 clone 上通常只有这个
+        ROOT / "data" / "downloads" / "Qwen3-1.7B-Base-ReTok",
+        ROOT / "output" / "Qwen3-1.7B-Base-ReTok",
     )
 
 
@@ -186,6 +193,7 @@ def test_ppl(py: str) -> bool:
     ckpt, script = resolve_ckpt(), resolve_ppl_script()
     if ckpt is None or script is None or not PPL_FIXTURE.exists():
         print(f"  跳过:ckpt={ckpt} script={script} fixture={PPL_FIXTURE.exists()}")
+        _SKIPPED.append("ppl")
         return True
 
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
@@ -206,6 +214,7 @@ def test_translate(py: str) -> bool:
     ckpt, script = resolve_ckpt(), resolve_trans_script()
     if ckpt is None or script is None:
         print(f"  跳过:ckpt={ckpt} script={script}")
+        _SKIPPED.append("trans")
         return True
 
     comet = resolve_comet()
@@ -242,6 +251,7 @@ def test_mono(py: str) -> bool:
     ckpt, script = resolve_ckpt(), resolve_mono_script()
     if ckpt is None or script is None:
         print(f"  跳过:ckpt={ckpt} script={script}")
+        _SKIPPED.append("mono")
         return True
 
     with tempfile.TemporaryDirectory() as d:
@@ -283,7 +293,14 @@ def main() -> int:
     if a.only in (None, "mono"):
         ok &= test_mono(a.python)
 
-    print("\n" + ("全部通过" if ok else "有不符项 —— 改坏了"))
+    asked = {"ppl", "trans", "mono"} if a.only is None else {a.only}
+    ran = asked - set(_SKIPPED)
+    if not ran:
+        print(f"\n**一项都没跑**(跳过 {sorted(_SKIPPED)})—— 这不是通过。")
+        print("  缺 checkpoint 就先:make -C data download-retok_model")
+        return 1
+    tail = f"  (跳过 {sorted(_SKIPPED)})" if _SKIPPED else ""
+    print("\n" + (f"通过 {sorted(ran)}{tail}" if ok else f"有不符项 —— 改坏了{tail}"))
     return 0 if ok else 1
 
 
