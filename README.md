@@ -20,16 +20,17 @@ from tokenizer import PieceTokenizerWrapper
 
 tok = PieceTokenizerWrapper(".")
 model = Qwen3ForCausalLM.from_pretrained(".", device="cuda", dtype=torch.bfloat16)
-ids = tok.encode("中国科学院计算技术研究所")
+ids = tok.encode("机器翻译的基本任务是")
 logits = model(torch.tensor([ids], device="cuda"))
 ```
 
-贪心续写的完整循环在发布包的 `example_load.py` 里,跑出来是:
+贪心续写的完整循环在发布包的 `example_load.py` 里。**这是 base 模型,只会续写,
+不会对话** ——「█」之后是它接出来的,各截到第一个句号:
 
 ```
-'中国科学院计算技术研究所' -> 5 tokens
-中国科学院计算技术研究所的前身是中国科学院计算技术研究所,是中国科学院直属的
-以计算机技术和软件技术研究为核心的综合性研究所。
+机器翻译的基本任务是█将一种语言的文本翻译成另一种语言的文本。
+中文分词的目标是█将一个句子分割成若干个词语，这些词语是句子的基本单位。
+深度学习之所以有效,是因为█它能从大量的数据中学习到有用的特征,而这些特征是人类无法通过传统的方法发现的。
 ```
 
 ## 模型
