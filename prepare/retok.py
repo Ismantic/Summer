@@ -106,7 +106,20 @@ def write_tokenizer_files(args, special_token_ids, output_path):
 
     import shutil
     shutil.copy2(args.new_tokenizer_path, os.path.join(output_path, "piece.model"))
+
+    # **dict.txt 必须一起拷。** 少了它中文的 token id 会变(不只是慢),而且
+    # round-trip 照样正确、看不出来。手术产物缺 dict 的话,后面 p1 加载它时
+    # 会被 prepare/tokenizer.py 的检查拦住 —— 整条链断在这里。
+    # 词表和 dict 都在 clone 的 PieceTokenizer 的 save/ 下,用 resolve_assets 反查。
+    cn_dict = getattr(args, "cn_dict", None)
+    if not cn_dict:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from prepare.tokenizer import resolve_assets
+        _, cn_dict = resolve_assets()
+    shutil.copy2(cn_dict, os.path.join(output_path, "dict.txt"))
     print(f"Saved tokenizer files to {output_path}")
+    print(f"  dict.txt <- {cn_dict}")
 
 
 def lookup_id(old_tokenizer, piece):
@@ -244,5 +257,7 @@ if __name__ == "__main__":
     parser.add_argument("--old_model_path", type=str, required=True)
     parser.add_argument("--new_tokenizer_path", type=str, required=True)
     parser.add_argument("--output_path", type=str, required=True)
+    parser.add_argument("--cn_dict", type=str, default=None,
+                        help="中文分词词典;不传就从 clone 的 PieceTokenizer 反查")
     args = parser.parse_args()
     main(args)

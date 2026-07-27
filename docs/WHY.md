@@ -73,7 +73,32 @@ peft 的 `ModulesToSave` 会 deepcopy embed/lm_head,那正是 tie 被破坏的�
 `test_reproduce_sota.py --only ppl` 会**静默跳过**(而不是失败)—— 等于没有防线。
 已加 `!test/fixtures/*.pt`。
 
-### 6. PieceTokenizer 重建后行为可能变,而且没有提示
+### 6. 上游 API 改名,悄悄弄坏了一条没人走的路径
+
+`prepare/encode_corpus.py` 调 `tok.load(model, cn_dict=...)`,而 PieceTokenizer
+在 commit `20d55e0`(*Refactor tokenizer dispatch and harden model I/O*)把这个
+关键字从 `cn_dict` 改成了 `dict`:
+
+    - py::arg("model_file"), py::arg("cn_dict") = ""
+    + py::arg("model_file"), py::arg("dict") = ""
+
+**预编码从那次改名起就是坏的,一直没人发现** —— v18 之后就没再跑过预编码,
+直到 2026-07-27 才撞上。现在改成位置参数 `tok.load(model, cn_dict)`,不依赖
+关键字名。
+
+同类的还有 `save/export.py` 里写死的 `core/tokenizer_wrapper.py`(阶段 1 搬到
+`prepare/tokenizer.py` 了),以及 `prepare/Makefile` 里用相对路径传 `BASE`
+(`make -C` 会切目录,相对路径被 transformers 当成 repo id)。
+
+教训:**改完的代码路径必须真跑一遍。** 语法检查、dry-run、import 检查都发现
+不了这类问题。改造期间三个 bug 都是这么抓到的。
+
+### 7. 手术产物必须带 `dict.txt`
+
+`prepare/retok.py` 原来只拷 `piece.model`。手术产物缺 dict 的话,后面
+`make p1` 加载它会被第 1 条的检查拦住 —— 整条链断在这里。现在一起拷。
+
+### 8. PieceTokenizer 重建后行为可能变,而且没有提示
 
 分词器是 C++ 编的,换 commit、换编译器、换 CMake 选项都可能改变编码,
 不会有任何提示。所以:
@@ -82,10 +107,21 @@ peft 的 `ModulesToSave` 会 deepcopy embed/lm_head,那正是 tie 被破坏的�
     2. bash prepare/install_deps.sh        ← 重建
     3. python test/test_tokenizer.py       ← 比对
 
-顺序反了就失去意义。本机已经出现过版本漂移:`.venv` 装的 piece_tokenizer
-来自 `BERTc/deps/PieceTokenizer`(commit `7331d09`),不是文档说的
-`Shiyu/PieceTokenizer`(`5c3f081`)。两边 `src/` 恰好逐字节相同,所以没出事 ——
-那是运气,不是设计。
+顺序反了就失去意义。
+
+**本机已经出现过版本漂移,而且它真的弄坏了东西。** `.venv` 装的
+piece_tokenizer 来自 `BERTc/deps/PieceTokenizer`(commit `7331d09`),不是老
+文档说的 `Shiyu/PieceTokenizer`(`5c3f081`)。这两个 clone 的 `src/` 逐字节
+相同,所以**编码行为**一致 —— 但真正要紧的漂移不在这两者之间,而在
+
+    v18 训练时用的版本  ←→  现在两个 clone 都在的版本
+
+之间:中间隔着 commit `20d55e0`,那次把 `load()` 的关键字从 `cn_dict` 改成
+`dict`(见第 6 条)。**只比 `src/` 是不够的 —— python binding 的签名也是行为
+的一部分。**
+
+`test_tokenizer.py` 比的是编码行为,抓不到 API 改名(它自己用位置参数)。
+抓到那个的是「真跑一遍」。两种检查都需要。
 
 ---
 

@@ -169,7 +169,7 @@ def main() -> None:
     for name in FILES_TO_COPY:
         link_or_copy(source / name, out / name, args.copy)
 
-    shutil.copy2(ROOT / "core" / "tokenizer_wrapper.py", out / "tokenizer_wrapper.py")
+    shutil.copy2(ROOT / "prepare" / "tokenizer.py", out / "tokenizer_wrapper.py")
     shutil.copy2(ROOT / "docs" / "reports" / "v18_tie_lineage.md", out / "training_lineage.md")
     write_text(out / "README.md", MODEL_CARD.replace(DEFAULT_REPO_ID, args.repo_id))
     write_text(out / ".gitattributes", GITATTRIBUTES)

@@ -38,7 +38,12 @@ PY      ?= $(if $(VIRTUAL_ENV),$(VIRTUAL_ENV)/bin/python,python3)
 PY_EVAL ?= $(PY)
 
 OUT       := $(ROOT)/output
-BASE      ?= Qwen/Qwen3-1.7B-Base
+# 基座:注册表里下好了就用本地目录,没下就退回 HF repo id(在线拉)。
+# 不要写相对路径 —— `make -C prepare` 会切目录,相对路径会被 transformers
+# 当成 repo id,报 HFValidationError。
+BASE      ?= $(shell $(PY) -c "import sys;sys.path.insert(0,'$(ROOT)');\
+             from data import source as s;d=s.get('qwen_base').dir();\
+             print(d if (d/'config.json').exists() else s.get('qwen_base').repo_id)" 2>/dev/null)
 INIT      ?= $(OUT)/init_retok
 MAIN_PT   ?= $(OUT)/main_1024.pt
 ANNEAL_PT ?= $(OUT)/anneal_1024.pt
@@ -82,6 +87,7 @@ retok:
 	$(PY) $(HERE)retok.py \
 	    --old_model_path $(BASE) \
 	    --new_tokenizer_path $(PIECE) \
+	    --cn_dict $(CN_DICT) \
 	    --output_path $(INIT)
 
 # ---------------------------------------------------------------- 预编码

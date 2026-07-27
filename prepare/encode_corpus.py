@@ -87,7 +87,10 @@ def worker_process_shard(args):
      tok_model, cn_dict, out_path, shard_idx) = args
     import piece_tokenizer as pt
     tok = pt.Tokenizer()
-    tok.load(tok_model, cn_dict=cn_dict)
+    # 位置参数,不用关键字 —— 上游 commit 20d55e0 把这个参数从 `cn_dict` 改名成
+    # `dict`,写死关键字名会在升级 PieceTokenizer 之后突然 TypeError。
+    # 这条路径就这么坏过一次:v18 之后没再跑过预编码,直到 2026-07-27 才发现。
+    tok.load(tok_model, cn_dict)
     eos = tok.piece_to_id("</s>")
 
     target_chunks = max(1, target_tokens // seq_len)
