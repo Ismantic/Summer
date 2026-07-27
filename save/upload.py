@@ -6,7 +6,7 @@
 
 ## 先想清楚要不要传权重
 
-`--code-only` 跳过 `model.safetensors` 和两个词表文件,只传
+`--code-only` 只跳过 `model.safetensors`(3GB),词表和代码都传 ——
 推理代码、模型卡、配置。**权重没变时一定用它**:
 
 - 3.0GB 重传一遍纯属浪费
@@ -43,10 +43,12 @@ DEFAULT_DIR = Path(__file__).resolve().parent / "releases"
 # __pycache__/。BERTc 就因为这个把 .pyc 传上去过一次。
 IGNORE = ["__pycache__/**", "**/__pycache__/**", "**/*.pyc", ".cache/**"]
 
-# --code-only 时跳过的大文件。config.json / token_mapping.json 是配置不是权重,
-# 很小而且改架构描述时要跟着更新,所以照传。
-WEIGHTS = ["model.safetensors", "Summer-Tokenizer.pt",
-           "Summer-Tokenizer.dict.txt"]
+# --code-only 时跳过的**只有 3GB 权重**。
+#
+# 词表(Summer-Tokenizer.pt / .dict.txt)加起来 7MB,而且**必须与加载器期望的
+# 文件名保持同步** —— 改了名却不推,线上就会出现「模型卡写 Summer-Tokenizer.pt
+# 而目录里是 piece.model」的不一致。所以词表跟代码一起走,不算 WEIGHTS。
+WEIGHTS = ["model.safetensors"]
 
 
 def main() -> int:
