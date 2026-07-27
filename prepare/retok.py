@@ -35,6 +35,10 @@ def build_embedding_mapping(old_tokenizer, new_tok, new_vocab_size, old_embeddin
     new_embeddings = torch.zeros(new_vocab_size, embed_dim, dtype=old_embeddings.dtype)
     fallback = old_embeddings.float().mean(dim=0).to(old_embeddings.dtype)
 
+    # 一对一映射的 id 单独记下来 —— Phase 1 可以冻结这些行(它们的初始化
+    # 是精确的旧嵌入,不需要重学)。旧版本这段逻辑在 tools/get_frozen_ids.py
+    # 里重算了一遍,现在顺手导出,不再重复。
+    one_to_one_ids: list[int] = []
     one_to_one = multi = skipped = 0
 
     for i in tqdm(range(new_tok.vocab_size()), desc="Mapping embeddings"):
@@ -64,6 +68,7 @@ def build_embedding_mapping(old_tokenizer, new_tok, new_vocab_size, old_embeddin
             new_embeddings[i] = old_vecs.mean(dim=0).to(old_embeddings.dtype)
             if len(old_ids) == 1:
                 one_to_one += 1
+                one_to_one_ids.append(i)
             else:
                 multi += 1
         else:
@@ -74,7 +79,7 @@ def build_embedding_mapping(old_tokenizer, new_tok, new_vocab_size, old_embeddin
     print(f"  one-to-one : {one_to_one:>6} ({100*one_to_one/total:5.1f}%)")
     print(f"  multi-to-one: {multi:>6} ({100*multi/total:5.1f}%)")
     print(f"  fallback   : {skipped:>6} ({100*skipped/total:5.1f}%)")
-    return new_embeddings
+    return new_embeddings, one_to_one_ids
 
 
 def write_tokenizer_files(args, special_token_ids, output_path):
@@ -139,7 +144,7 @@ def main(args):
     print(f"Old embedding shape: {tuple(old_embeddings.shape)}")
 
     print("Building new embeddings...")
-    new_embeddings = build_embedding_mapping(
+    new_embeddings, one_to_one_ids = build_embedding_mapping(
         old_tokenizer, new_tok, new_vocab_size, old_embeddings
     )
 
@@ -215,10 +220,24 @@ def main(args):
     with open(os.path.join(args.output_path, "token_mapping.json"), "w") as f:
         json.dump(mapping, f, indent=2)
 
+    dump_frozen_ids(one_to_one_ids, args.output_path)
     print(f"\nDone. Saved to {args.output_path}")
     print(f"  vocab: {model.config.vocab_size}")
     print(f"  embed: {tuple(model.model.embed_tokens.weight.shape)}")
 
+
+
+def dump_frozen_ids(one_to_one_ids, output_path):
+    """写出一对一映射的 token id,给 --freeze_mapped_embeds 用。
+
+    这些行的初始化就是精确的旧嵌入,Phase 1 冻结它们、只训真正需要重学的
+    那 ~26%(多对一 + fallback)。
+    """
+    import json as _json
+    f = os.path.join(output_path, "frozen_ids.json")
+    with open(f, "w") as fh:
+        _json.dump(one_to_one_ids, fh)
+    print(f"  frozen_ids.json: {len(one_to_one_ids)} 个一对一映射的 id")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

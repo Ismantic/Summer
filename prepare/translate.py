@@ -20,22 +20,38 @@ import sys
 
 import sacrebleu
 
-# Reuse pieces from the transformers eval script and root-level helpers.
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HERE = os.path.dirname(os.path.abspath(__file__))
 for p in (ROOT, HERE):
     if p not in sys.path:
         sys.path.insert(0, p)
-from _translate_common import (
-    load_tokenizer,
-    load_pair,
-    pick_exemplars,
-    build_prompt,
-    encode_prompts,
-    trim_continuation,
-    compute_comet,
-    SRC_LABEL,
-)
+
+
+
+
+# ---- 以下来自原 eval_pretrain_translate.py(非 vLLM 版)----
+import argparse
+import json
+import os
+import random
+import sys
+import time
+
+import sacrebleu
+import torch
+from transformers import AutoModelForCausalLM
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+
+PROMPT_HEADER = {
+    "zh-en": "Translate Chinese to English.\n\n",
+    "en-zh": "Translate English to Chinese.\n\n",
+}
+SRC_LABEL = {"zh-en": "Chinese", "en-zh": "English"}
+TGT_LABEL = {"zh-en": "English", "en-zh": "Chinese"}
 
 
 
@@ -47,6 +63,85 @@ def _default_comet() -> str:
         _sys.path.insert(0, _root)
     from data import source as _s
     return str(_s.get("comet").dir())
+
+def load_tokenizer(model_path):
+    if os.path.exists(os.path.join(model_path, "piece.model")):
+        from prepare.tokenizer import PieceTokenizerWrapper
+        return PieceTokenizerWrapper(model_path)
+    from transformers import AutoTokenizer
+    return AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+
+def load_pair(testset: str, direction: str):
+    src_file = sacrebleu.get_source_file(testset, direction)
+    ref_files = sacrebleu.get_reference_files(testset, direction)
+    with open(src_file) as f:
+        sources = [line.strip() for line in f]
+    with open(ref_files[0]) as f:
+        references = [line.strip() for line in f]
+    return sources, references
+
+
+def pick_exemplars(direction: str, n: int, seed: int = 0,
+                   exemplar_set: str = "wmt21"):
+    """Pull n (src, ref) pairs from a fixed earlier test set, deterministic."""
+    src, ref = load_pair(exemplar_set, direction)
+    rng = random.Random(seed)
+    idxs = list(range(len(src)))
+    rng.shuffle(idxs)
+    picked = idxs[:n]
+    return [(src[i], ref[i]) for i in picked]
+
+
+def build_prompt(direction: str, exemplars, test_src: str) -> str:
+    s_label = SRC_LABEL[direction]
+    t_label = TGT_LABEL[direction]
+    parts = [PROMPT_HEADER[direction]]
+    for s, r in exemplars:
+        parts.append(f"{s_label}: {s}\n{t_label}: {r}\n\n")
+    parts.append(f"{s_label}: {test_src}\n{t_label}:")
+    return "".join(parts)
+
+
+def encode_prompts(tokenizer, prompts):
+    """Returns list[list[int]] of token id lists, no special tokens added."""
+    out = []
+    for p in prompts:
+        ids = tokenizer.encode(p, add_special_tokens=False)
+        if not isinstance(ids, list):
+            ids = ids.tolist() if hasattr(ids, "tolist") else list(ids)
+        out.append(ids)
+    return out
+
+
+def trim_continuation(text: str, src_label: str) -> str:
+    """Stop at the next 'English:' / 'Chinese:' header (newline OR space-separated)
+    or first blank line. Models trained on diverse data sometimes emit space-only
+    separators instead of newlines, so we match both."""
+    stops = ("\n\n", "\n English:", "\n Chinese:",
+             "\nEnglish:", "\nChinese:", "  English:", "  Chinese:",
+             f"  {src_label}:", f"\n{src_label}:")
+    cuts = [text.find(s) for s in stops]
+    cuts = [c for c in cuts if c != -1]
+    if cuts:
+        text = text[:min(cuts)]
+    return text.strip()
+
+
+def compute_comet(sources, translations, references, comet_model_path, batch_size=16):
+    """Compute COMET score using a local Unbabel/wmt22-comet-da snapshot."""
+    from comet import load_from_checkpoint
+    import glob
+    # COMET package expects a .ckpt file inside the model dir
+    ckpts = glob.glob(f"{comet_model_path}/**/*.ckpt", recursive=True)
+    if not ckpts:
+        raise FileNotFoundError(f"No .ckpt found under {comet_model_path}")
+    model = load_from_checkpoint(ckpts[0])
+    data = [{"src": s, "mt": t, "ref": r}
+            for s, t, r in zip(sources, translations, references)]
+    output = model.predict(data, batch_size=batch_size, gpus=1, progress_bar=False)
+    return float(output.system_score), [float(x) for x in output.scores]
+
 
 def evaluate_vllm(llm, tokenizer, direction, testset, exemplar_set, num_fewshot,
                   max_samples, max_new_tokens, seed, save_all_samples=False):
