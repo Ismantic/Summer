@@ -68,6 +68,12 @@ WMT22,1000 样本 5-shot,vLLM 后端:
 | Phase 1 | 0.5674 | 0.7301 | 0.5137 | 0.6375 | 0.6263 | 0.0341 |
 | **Phase 2** | 0.5768 | 0.7367 | 0.5145 | 0.6389 | 0.6204 | 0.0349 |
 
+指标:LAMBADA / CEVAL 用 `acc`,PIQA / ARC-C / HellaSwag 用 `acc_norm`,
+GSM8K 用 `exact_match,strict-match`;shots 依次 0 / 5 / 25 / 10 / 5 / 5。
+**gsm8k 两个指标差得不小**(Phase 1 的 flexible-extract 是 0.0417),所以
+必须写明用的哪个 —— 口径以 [`prepare/sweep.py`](prepare/sweep.py) 的
+`PREFER` 为准。
+
 **vLLM 的贪心解码不可复现** —— 同一 ckpt 跑 6 次,BLEU 的 range 是 0.10–0.13。
 0.1 量级的差是噪声不是结论;COMET 稳两个数量级,更可靠。两个后端的数字也不能
 混着比(实测 lambada 上差 2.2 个点)。口径见

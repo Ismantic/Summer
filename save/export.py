@@ -124,27 +124,44 @@ the GitHub repo under `docs/reports/`.
 
 ## Evaluation
 
-WMT22 1000-sample translation:
+All numbers come from the vLLM backend. **Do not mix backends** — measured on
+the same base model, lambada differs by 0.0223 between transformers and vLLM,
+and the direction is not even consistent across tasks.
+
+WMT22, 1000 samples, 5-shot (sacrebleu / COMET wmt22-da):
 
 | Model | zh-en BLEU | zh-en COMET | en-zh BLEU | en-zh COMET |
 | --- | ---: | ---: | ---: | ---: |
-| Qwen3-1.7B-Base | 22.3408 | 0.8122 | 38.3380 | 0.8597 |
-| ReTok v18 Phase 1 | 20.2588 | 0.7821 | 35.1632 | 0.8276 |
-| ReTok v18 Phase 2 tie | 20.4599 | 0.7933 | 36.0314 | 0.8444 |
+| Qwen3-1.7B-Base | 22.34 | 0.8122 | 38.34 | 0.8597 |
+| ReTok v18 Phase 1 | 20.26 | 0.7821 | 35.16 | 0.8276 |
+| **ReTok v18 Phase 2 tie** (this model) | **20.46** | **0.7933** | **36.03** | **0.8444** |
 
-WMT23 full-set translation:
+WMT23, full set:
 
 | Model | zh-en BLEU | zh-en COMET | en-zh BLEU | en-zh COMET |
 | --- | ---: | ---: | ---: | ---: |
-| ReTok v18 Phase 1 | 19.1310 | 0.7767 | 38.8251 | 0.8198 |
-| ReTok v18 Phase 2 tie | 19.6046 | 0.7834 | 40.9905 | 0.8377 |
+| ReTok v18 Phase 1 | 19.13 | 0.7767 | 38.83 | 0.8198 |
+| **ReTok v18 Phase 2 tie** (this model) | **19.60** | **0.7834** | **40.99** | **0.8377** |
 
-General benchmark results:
+**BLEU is quoted to two decimals on purpose.** vLLM's greedy decoding is not
+reproducible: over 6 runs of the same checkpoint the BLEU range is 0.10–0.13,
+so a difference of that order is noise, not a result. COMET is two orders of
+magnitude more stable and is the more reliable of the two.
+
+General benchmarks (lm-evaluation-harness):
 
 | Model | LAMBADA | PIQA | ARC-C | HellaSwag | CEVAL | GSM8K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ReTok v18 Phase 1 | 0.5674 | 0.7301 | 0.5137 | 0.6375 | 0.6263 | 0.0417 |
-| ReTok v18 Phase 2 tie | 0.5768 | 0.7367 | 0.5145 | 0.6389 | 0.6204 | 0.0356 |
+| Qwen3-1.7B-Base | 0.6513 | 0.7731 | 0.5512 | 0.6705 | 0.6560 | 0.6710 |
+| ReTok v18 Phase 1 | 0.5674 | 0.7301 | 0.5137 | 0.6375 | 0.6263 | 0.0341 |
+| **ReTok v18 Phase 2 tie** (this model) | **0.5768** | **0.7367** | **0.5145** | **0.6389** | **0.6204** | **0.0349** |
+
+Metrics: `acc` for LAMBADA and CEVAL, `acc_norm` for PIQA / ARC-C / HellaSwag,
+`exact_match,strict-match` for GSM8K. Shots: 0 / 5 / 25 / 10 / 5 / 5.
+
+**GSM8K is a known, permanent loss.** Replacing the vocabulary breaks Qwen3's
+numeric tokenization, and neither phase recovers it. This is the price of the
+new vocabulary, not a regression to chase.
 
 ## Limitations
 
