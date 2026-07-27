@@ -30,15 +30,13 @@
 # ## 两个解释器
 #
 # PY       训练(src/ 只要 torch)
-# PY_EVAL  评测(要 vllm + comet)。**和 PY 同一个 venv 就行**;留着这个变量
-#          是为了别的机器上还能拆开。
+# PY  解释器。训练和评测同一个 venv,所以只有这一个变量。
 # 都写在仓库根的 local.mk(gitignore)里。
 
 HERE  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 ROOT  := $(HERE)..
 -include $(ROOT)/local.mk
 PY      ?= $(if $(VIRTUAL_ENV),$(VIRTUAL_ENV)/bin/python,python3)
-PY_EVAL ?= $(PY)
 
 OUT       := $(ROOT)/output
 # 基座:注册表里下好了就用本地目录,没下就退回 HF repo id(在线拉)。
@@ -159,16 +157,16 @@ p2:
 # ---------------------------------------------------------------- 评测
 
 bench:
-	$(PY_EVAL) $(HERE)benchmark.py --model_path $(CKPT) \
+	$(PY) $(HERE)benchmark.py --model_path $(CKPT) \
 	    --tasks "lambada_openai:0,piqa:5,arc_challenge:25,hellaswag:10,ceval-valid:5,gsm8k:5" \
 	    --output_dir $(ROOT)/eval_results/full/$(TAG)_vllm
 
 trans:
-	$(PY_EVAL) $(HERE)translate.py --model_path $(CKPT) \
+	$(PY) $(HERE)translate.py --model_path $(CKPT) \
 	    --testset wmt22 --exemplar_set wmt21 --direction both \
 	    --num_fewshot 5 --max_samples 1000 --compute_comet --save_all_samples \
 	    --output_path $(ROOT)/eval_results/translate_wmt22/$(TAG)_vllm_1000_comet.json
 
 # 多 ckpt:make sweep CKPTS="base=/path/a v18=output/phase2_ckpt_v18_tie"
 sweep:
-	$(PY) $(HERE)sweep.py run --python $(PY_EVAL) --ckpt $(CKPTS)
+	$(PY) $(HERE)sweep.py run --python $(PY) --ckpt $(CKPTS)

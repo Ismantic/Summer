@@ -43,7 +43,7 @@ make test                  # 回归防线
 ## 测试
 
 改了 `src/` 或 `prepare/` 之后跑 `make test`(五项,几分钟)。涉及评测口径的
-改动再跑 `make test-full`(加 trans 5 分钟 + mono 36 分钟,要 `PY_EVAL`)。
+改动再跑 `make test-full`(加 trans 5 分钟 + mono 36 分钟,走 vLLM)。
 
 **`trans` 和 `mono` 走 vLLM,测不到 `src/model.py`** —— 能锚住自写模型的只有
 `test_model_equiv.py` 和 `--only ppl`。

@@ -182,8 +182,7 @@ make -C prepare status     # 每一步产物在不在
 Python 3.11 + torch 2.11,单张 RTX 4090(24GB,bf16),没有多卡代码路径。
 
 ```bash
-uv pip install -r requirements.txt          # 训练侧
-uv pip install -r requirements-eval.txt     # 评测侧(vllm + comet + lm_eval)
+uv pip install -r requirements.txt          # 训练 + 评测,一条就够
 ```
 
 **一个 venv 就够**,训练和评测都在里面。之所以是 3.11 而不是更新的版本:

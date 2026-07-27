@@ -43,7 +43,7 @@ save/       导出 HF 发布包 + 上传 + 核对
 - 曾经是两个(3.14 训练 + 3.11 评测),因为 vllm 和 comet 都上不了 3.14。
   **方向搞反了才卡住** —— 往 3.14 装 vllm 不行,但把训练搬到 3.11 完全可以:
   `src/` 只依赖 torch,torch 支持 3.11。合并的验证见 `docs/WHY.md` 第五节。
-- 路径写在 gitignore 的 `local.mk`(`PY`,`PY_EVAL` 指同一个)。
+- 解释器路径写在 gitignore 的 `local.mk`,**只有 `PY` 一个变量**。
   **不要把路径写回 Makefile**,那样别的机器就跑不了。
   **也不要在跟踪的文件里写本机绝对路径** —— 那会把用户名推到 GitHub 上,
   `make test` 里的 `test-noleak` 会拦。
@@ -86,7 +86,7 @@ save/       导出 HF 发布包 + 上传 + 核对
 
 ```bash
 make test          # 五项:equiv / lora / tok / retok / ppl,几分钟
-make test-full     # 再加 trans(5 分钟)和 mono(36 分钟),都要 PY_EVAL
+make test-full     # 再加 trans(5 分钟)和 mono(36 分钟),走 vLLM
 ```
 
 | | 防什么 |

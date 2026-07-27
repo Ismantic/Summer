@@ -232,7 +232,7 @@ corpus_v17/
 _attic/
 tokenizer_corpus/
 
-# 本机 PY/PY_EVAL 路径,见各层 Makefile
+# 本机 PY 路径,见各层 Makefile
 local.mk
 deps/
 data/downloads/

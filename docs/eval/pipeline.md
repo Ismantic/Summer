@@ -4,8 +4,8 @@
 
 | | 跑什么 | 需要 | 耗时 |
 |---|---|---|---|
-| `prepare/benchmark.py` | mono 六任务(lm-eval-harness) | `PY_EVAL`(vllm + lm_eval) | ~36 分钟 |
-| `prepare/translate.py` | WMT BLEU + COMET | `PY_EVAL`(+ comet 模型) | ~5 分钟 |
+| `prepare/benchmark.py` | mono 六任务(lm-eval-harness) | vllm + lm_eval | ~36 分钟 |
+| `prepare/translate.py` | WMT BLEU + COMET | vllm + comet 模型 | ~5 分钟 |
 | `src/evaluate.py` | 固定切片 next-token loss | `PY`(只要 torch) | 几秒 |
 
 批量:`prepare/sweep.py run --ckpt tag=path ...`,跑完出对照表。

@@ -17,13 +17,11 @@
 # 那样别的机器就跑不了。需要两个:
 #
 #   PY       训练 / src(只要 torch)
-#   PY_EVAL  评测(vllm + comet)。**现在和 PY 是同一个 venv** —— 留着这个变量
-#            是为了别的机器上还能拆成两个。
+#   PY  解释器。训练和评测同一个 venv,所以只有这一个变量。
 
 HERE := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 -include $(HERE)local.mk
 PY      ?= $(if $(VIRTUAL_ENV),$(VIRTUAL_ENV)/bin/python,python3)
-PY_EVAL ?= $(PY)
 
 .PHONY: help status deps test test-equiv test-lora test-tok test-retok \
         test-ppl test-full clean-pyc
@@ -80,8 +78,8 @@ test-ppl:
 
 test-full: test
 	$(PY) $(HERE)test/test_reproduce_sota.py --only ppl
-	$(PY) $(HERE)test/test_reproduce_sota.py --only trans --python $(PY_EVAL)
-	$(PY) $(HERE)test/test_reproduce_sota.py --only mono  --python $(PY_EVAL)
+	$(PY) $(HERE)test/test_reproduce_sota.py --only trans --python $(PY)
+	$(PY) $(HERE)test/test_reproduce_sota.py --only mono  --python $(PY)
 
 clean-pyc:
 	find $(HERE) -name __pycache__ -type d -not -path "*/_attic/*" -exec rm -rf {} + 2>/dev/null || true
