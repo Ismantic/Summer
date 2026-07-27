@@ -1,26 +1,59 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
-Keep the top level clean: shared runtime modules live in `core/`, training entrypoints in `train/`, corpus download and packing scripts in `data_prep/`, Python evaluation entrypoints in `evals/`, diagnostics in `analysis/`, one-off artifact utilities in `tools/`, shell launchers in `runs/`, and supporting writeups in `docs/`. Reference papers live in `papers/`, tokenizer assets in `piece_*.model` and `dict.txt`, and generated artifacts belong in `output/` or `eval_results/`.
+面向自动化 agent 的简版说明。完整版见 `CLAUDE.md`,设计理由见 `docs/WHY.md`。
 
-## Build, Test, and Development Commands
-Use the checked-in `Makefile` for the main tokenizer replacement loop:
+## 结构
 
-- `make download` downloads `Qwen/Qwen3-0.6B-Base` into the configured local path.
-- `make replace` runs `tools/replace_tokenizer.py` and creates the `*-new-tok` model directory.
-- `make eval-base` runs the baseline `lm_eval` benchmark set.
-- `make eval-new` runs the piece-tokenizer adapter in `evals/eval_with_piece.py`.
-- `bash runs/smoke_test.sh` compares base vs. swapped tokenizer on the reduced smoke suite.
-- `bash runs/test_inline_eval.sh` checks the inline evaluation path before longer runs.
+四层,按数据流切:
 
-## Coding Style & Naming Conventions
-Follow the style already used in the repo: 4-space indentation, snake_case for Python functions and filenames, and `UPPER_CASE` for shared constants such as dataset weights or path defaults. Keep new experiment files versioned and descriptive, for example `pretokenize_v20.py` or `run_v20_train.sh`. Prefer `argparse` for new Python entrypoints and make machine-specific paths overrideable with flags or environment variables.
+```
+data/       下载。source.py 是数据源注册表,唯一的真相来源
+prepare/    编排:依赖、词表手术、预编码、调训练、评测
+src/        模型 + 训练。**只依赖 torch**
+save/       导出 HF 发布包 + 上传 + 核对
+```
 
-## Testing Guidelines
-There is no dedicated unit-test package here; validation is script-based. For tokenizer or evaluation changes, run `bash runs/smoke_test.sh` first, then the relevant `make eval-*` target. For data-pipeline or training edits, run the narrowest affected launcher in `runs/` and store logs under `output/` or `eval_results/`. If a benchmark requires code execution, document the needed environment variables, such as `HF_ALLOW_CODE_EVAL=1` for HumanEval.
+外加 `deps/`(gitignore)、`docs/`、`test/`、`papers/`。产物落 `output/` 和
+`eval_results/`,都 gitignore。
 
-## Commit & Pull Request Guidelines
-Match the existing history's short, component-first subjects, such as `CLAUDE.md: ...`, `BERT/train_bert_mlm.py: ...`, or `v19 ...`. Keep each commit scoped to one experiment or tooling change. Pull requests should state the experiment goal, touched scripts, required local paths or GPU assumptions, commands executed, and where reviewers can find metrics or logs. Do not commit model weights, downloaded corpora, or other large generated artifacts.
+两条不能破坏的分层约束:**`src/` 只依赖 torch**;**`src/` 不碰文本**
+(分词在 `prepare/`,`src/` 只读预编码好的 id)。
 
-## Environment Notes
-Many scripts assume `~/...` paths and fixed CUDA devices. When updating shared scripts, preserve those defaults only if they remain overrideable via variables like `QWEN_BASE`, `QWEN_NEW`, `OUT`, and `LIMIT`.
+## 命令
+
+每层一个 Makefile,`make help` 有说明。
+
+```bash
+make deps                  # clone + 编译 PieceTokenizer
+make -C data probe         # 验数据源注册表(每源只下一个文件)
+make -C prepare retok      # 词表手术(不可逆)
+make -C prepare encode     # 预编码
+make -C prepare p1 / p2    # 两阶段训练
+make test                  # 回归防线
+```
+
+## 代码风格
+
+4 空格缩进,函数和文件名 snake_case,共享常量 UPPER_CASE。新入口用 `argparse`。
+**机器相关的路径不要写进代码** —— 数据走 `data/source.py` 注册表,解释器路径
+走 gitignore 的 `local.mk`,词表用 `prepare.tokenizer.resolve_assets()` 反查。
+
+不要再新增 `run_vNN.sh` 这类一次性脚本 —— 配方进 `prepare/Makefile`。
+
+## 测试
+
+改了 `src/` 或 `prepare/` 之后跑 `make test`(五项,几分钟)。涉及评测口径的
+改动再跑 `make test-full`(加 trans 5 分钟 + mono 36 分钟,要 `PY_EVAL`)。
+
+**`trans` 和 `mono` 走 vLLM,测不到 `src/model.py`** —— 能锚住自写模型的只有
+`test_model_equiv.py` 和 `--only ppl`。
+
+判断数字变化是否算数之前先看 `docs/WHY.md` 第二节:vLLM 贪心解码不可复现,
+BLEU 跑间 range 约 0.1;两个后端的数字不能混比。
+
+## 提交
+
+commit message 不要带 `Co-Authored-By: Claude ...` 或任何 AI 署名。
+
+删东西之前先 `du -sh` 看有没有 gitignored 的数据 —— `git ls-files` 看不到的
+才是危险的。

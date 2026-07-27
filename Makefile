@@ -5,6 +5,9 @@
 #   make deps          clone + 编译 PieceTokenizer
 #   make test          回归防线(改了 src/ 或 prepare/ 之后必跑)
 #
+# 重建 PieceTokenizer 之前先 `python test/capture_baseline.py` 抓基线 ——
+# 顺序反了就失去意义,基线是用来发现「重建把行为改了」的。
+#
 # 分层跑,每层自己的 Makefile 里有更细的 target:
 #
 #   make -C data       下载语料与评测资产
@@ -21,7 +24,8 @@ HERE := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 PY      ?= $(if $(VIRTUAL_ENV),$(VIRTUAL_ENV)/bin/python,python3)
 PY_EVAL ?= $(PY)
 
-.PHONY: help status deps test test-equiv test-lora test-ppl test-full clean-pyc
+.PHONY: help status deps test test-equiv test-lora test-tok test-retok \
+        test-ppl test-full clean-pyc
 
 help:
 	@awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' $(HERE)Makefile
@@ -48,7 +52,15 @@ deps:
 #   equiv  自写 Qwen3 vs transformers,逐层对齐(结构判据)
 #   lora   自写 LoRA vs peft(数学判据)
 #   ppl    固定切片 next-token loss(端到端锚点)
-test: test-equiv test-lora test-ppl
+test: test-equiv test-lora test-tok test-retok test-ppl
+
+# 分词器行为没变(需要先有基线,见 test/capture_baseline.py)
+test-tok:
+	$(PY) $(HERE)test/test_tokenizer.py
+
+# 换词表后的模型自洽:特殊 token、round-trip、forward 数值
+test-retok:
+	$(PY) $(HERE)test/test_retok.py
 
 test-equiv:
 	$(PY) $(HERE)test/test_model_equiv.py

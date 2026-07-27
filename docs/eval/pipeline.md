@@ -1,137 +1,99 @@
-# Evaluation Pipeline
+# 评测栈
 
-Unified vLLM-backed eval for the Summer (Qwen3 + piece tokenizer) project.
+## 三个入口
 
-Covers translation (WMT22), English mono (PIQA/ARC/HellaSwag/MMLU/LAMBADA),
-Chinese mono (C-Eval), and math (GSM8K) — 7 mono tasks + 2 translation
-directions — all on one vLLM engine, multi-GPU parallel across checkpoints.
-
-## TL;DR
-
-```bash
-# One-time: download all eval datasets (~3min)
-python evals/prefetch_eval_datasets.py
-
-# Smoke (~2min, --limit 30)
-bash runs/smoke_new_tasks.sh
-
-# Full retro on all ckpts (~55min on 2× A6000)
-python evals/retro_eval_mono_vllm.py --gpus 0 1
-
-# Comparison table
-python evals/eval_analysis.py
-```
-
-## File map
-
-| File | Purpose |
-|---|---|
-| `evals/eval_with_piece_vllm.py` | **Primary entry.** TemplateLM subclass that runs lm-eval-harness on a single ckpt via vLLM. Supports either `--task` (single) or `--tasks "lambada:0,piqa:5,..."` (batch — loads vLLM once, runs all tasks back-to-back). Auto-detects piece vs HF tokenizer. |
-| `evals/eval_pretrain_translate_vllm.py` | WMT22 translation eval (BLEU + COMET) via vLLM PagedAttention. Uses `piece_tokenizer` + `skip_tokenizer_init`. |
-| `evals/retro_eval_mono_vllm.py` | Batch retro driver: all listed ckpts × all listed tasks. `--gpus 0 1` shards ckpts across GPUs in a ThreadPoolExecutor (~2x wall-time). |
-| `evals/retro_eval_vllm.py` | Same idea but for translation only (WMT22). |
-| `runs/inline_eval_vllm_v2.sh` | Called from `train/finetune_muon.py --inline_eval_cmd` during training. Runs WMT22 every save, full mono suite at `--max_steps`. |
-| `evals/prefetch_eval_datasets.py` | One-time online pull of mmlu / ceval / gsm8k / mmlu_no_train. Run once; subsequent eval stays offline. |
-| `evals/eval_analysis.py` | Builds the final comparison table (% loss vs base for each ckpt × task). |
-| `runs/smoke_new_tasks.sh` | `--limit 50` sanity check for new tasks before a full run. |
-| `retest_base_mono.sh` | One-off helper to re-run base on the current `transformers` version (used to quantify the 4.57.6 BLEU-drift question). |
-
-### Deprecated / superseded
-
-| File | Replaced by | Why |
-|---|---|---|
-| `evals/eval_with_piece.py` | `evals/eval_with_piece_vllm.py` | transformers backend; bf16 attention kernels shift the argmax of under-trained ckpts. ckpt-dependent drift up to -10% on arc_c. |
-| `runs/inline_eval_progressive.sh` | `runs/inline_eval_vllm_v2.sh` | uses old `eval_with_piece.py`; subject to backend drift. |
-| `runs/inline_eval_vllm.sh` | `runs/inline_eval_vllm_v2.sh` | v1 only ran translation on vLLM; mono still on transformers. v2 routes everything through vLLM. |
-| `evals/retro_eval_comet.py` | `evals/retro_eval_vllm.py` | superseded by vLLM translation. |
-
-Kept for legacy ckpts whose results were already produced under those paths.
-
-## Benchmark suite
-
-| Task | Shots | Type | Dataset path |
+| | 跑什么 | 需要 | 耗时 |
 |---|---|---|---|
-| `piqa` | 5 | loglikelihood (2 choice) | `ybisk/piqa` |
-| `hellaswag` | 10 | loglikelihood (4 choice) | `Rowan/hellaswag` |
-| `arc_challenge` | 25 | loglikelihood (4 choice) | `allenai/ai2_arc` (`ARC-Challenge`) |
-| `mmlu` | 5 | loglikelihood (4 choice × 57 subjects) | `cais/mmlu` |
-| `lambada_openai` | 0 | last-word argmax (greedy) | `EleutherAI/lambada_openai` |
-| `ceval-valid` | 5 | loglikelihood (4 choice × 52 subjects) | `ceval/ceval-exam` |
-| `gsm8k` | 5 | `generate_until` + exact_match | `openai/gsm8k` |
-| WMT22 zh↔en | 5 | BLEU (sacrebleu) + COMET (`Unbabel/wmt22-comet-da`) | local |
+| `prepare/benchmark.py` | mono 六任务(lm-eval-harness) | `PY_EVAL`(vllm + lm_eval) | ~36 分钟 |
+| `prepare/translate.py` | WMT BLEU + COMET | `PY_EVAL`(+ comet 模型) | ~5 分钟 |
+| `src/evaluate.py` | 固定切片 next-token loss | `PY`(只要 torch) | 几秒 |
 
-### Missing / TODO
+批量:`prepare/sweep.py run --ckpt tag=path ...`,跑完出对照表。
+只汇总已有结果:`prepare/sweep.py table --tags ...`。
 
-- **CMMLU** (`haonan-li/cmmlu`, `lmlmcat/cmmlu`, `XiaHan19/cmmlu` all use a
-  Python loading script that `datasets >= 4.0` deprecated). Workaround:
-  download CSV files from upstream GitHub and write a local parquet wrapper.
-- **HumanEval / MBPP** (code) — intentionally skipped per project decision to
-  exclude code from the pretraining mix.
-- **MATH-500, AGIEval, BBH** — present in YuLan-Mini / ReTok Table 2 but not
-  yet in our suite.
+Makefile 里是 `make -C prepare bench / trans / sweep`。
 
-## Performance characteristics
+## 这三个各防一段,不能互相替代
 
-| Step | Cost | Notes |
+**`benchmark.py` 和 `translate.py` 走 vLLM,测不到 `src/model.py`** ——
+vLLM 从 checkpoint 直接加载权重,用它自己的 Qwen3 实现。那两项全绿也说明不了
+自写模型对不对。
+
+能锚住 `src/model.py` 的只有:
+
+- `test/test_model_equiv.py` —— 与 transformers 逐层对齐
+- `src/evaluate.py`(即 `make test-ppl`)—— 走自己的 forward
+
+RoPE 那个 autocast bug 就是这么抓到的:等价性测试漏了(它用 256 长度、
+没开 autocast),PPL 锚点抓到了。
+
+## 数字怎么读
+
+### vLLM 的贪心解码不可复现
+
+同一 ckpt、同一条命令跑 6 次:
+
+| | range | sd |
 |---|---|---|
-| HF datasets HEAD (per task) | 10s timeout × N tasks | **eliminated** by `HF_HUB_OFFLINE=1` (set inside `evals/eval_with_piece_vllm.py`) |
-| mmlu task-dict construct (57 subj) | 166s online → **2s offline** | same flags |
-| vLLM model load | ~20s | amortized across all tasks via `--tasks` batch mode |
-| arc_challenge inference (4687 reqs) | ~95s | vLLM continuous batching |
-| mmlu inference (56K reqs) | ~3-5min | KV cache size 360K tokens @ `max_model_len=4096` |
-| gsm8k generation (1319 docs) | ~80s | batched generate_until; was ~22min sequential |
+| zh-en BLEU | 0.1033 | 0.022 |
+| en-zh BLEU | 0.1337 | 0.056 |
+| zh-en COMET | 0.0010 | 0.0005 |
+| en-zh COMET | 0.0005 | 0.0002 |
 
-Total one-ckpt full-suite: **~12-15min** (vs ~50min pre-optimization).
-Eight-ckpt sweep on 2 GPUs: **~55min** (vs ~8h single-GPU).
+**0.1 量级的 BLEU 差是噪声。** COMET 稳两个数量级,比 BLEU 可靠。
 
-## Backend-stability notes
+mono 六任务里样本量大的(lambada 5153 / hellaswag 10042)能精确重现;
+ceval 的子任务只有 18–31 题,翻一两道就看得见,聚合值实测漂 +0.0022。
 
-All numbers comparing trained ckpts must be on the **same backend**.
+### 不能混后端
 
-- `transformers` and `vLLM` produce different bf16 attention kernels. On
-  **base** the drift is ≤2.6% (only lambada-style argmax-cascade tasks affected).
-- On **under-trained ckpts (v8 P1, etc.)** the drift can be -10% on arc_c
-  because logit margins are smaller and a few argmax flips compound.
-- Earlier-this-week confusion ("v15 is mono champion" vs "v15 is mono worst")
-  was 100% backend artifact — same ckpt evaluated on transformers vs vLLM gave
-  -5% vs -15% on arc_c. Lesson: **never mix backends in a comparison table**.
+实测同一个 Qwen3-1.7B-Base:
 
-## Output structure
+| 任务 | transformers | vLLM | 差 |
+|---|---|---|---|
+| lambada_openai | 0.6290 | 0.6513 | **+0.0223** |
+| piqa | 0.7720 | 0.7731 | +0.0011 |
+| arc_challenge | 0.5546 | 0.5512 | −0.0034 |
 
-```
-eval_results/full/
-├── base_vllm/
-│   ├── lambada_openai/result.json
-│   ├── piqa/result.json
-│   ├── ...
-│   ├── wmt22.json          # translation
-│   └── batch_run.log
-├── v8_p1_vllm/
-│   └── ...
-├── v16_p2_step2000/        # legacy translation tag (eval_analysis.py
-│                             special-cases this)
-└── ...
-```
+lambada 差 2.2 个点,方向还不一致。所以 `eval_results/full/` 的目录名带后端
+后缀,`sweep.py` 的 `read_mono()` **只认 `_vllm`,找不到就留空**。
 
-`evals/eval_analysis.py` walks these and prints a unified `% loss vs base` table
-for all ckpts × all 7 mono tasks + 4 translation metrics.
+### gsm8k 恒在 0.035 附近
 
-## Latest results (2026-05-15)
+换词表打断了 Qwen3 的数值 token 化,两个 phase 都救不回来。**词表代价,
+不是回归。**
+
+## 产物布局
 
 ```
-                  EN avg     ZH(ceval)    gsm8k     all avg     zh-en COMET    en-zh COMET
-base               —           —            —         —           —              —
-v8_p1            -14.34%     -27.82%     -100.0%   -28.50%     -11.86%        -8.74%
-v10_p2           -14.15%     -23.39%      -95.9%   -27.15%     -10.33%        -8.48%
-v11_p2           -13.90%     -29.97%     -100.0%   -28.50%     -10.96%        -8.94%
-v12_p1           -14.35%     -24.33%      -95.8%   -27.41%     -11.79%        -8.18%
-v12_p2           -13.52%     -24.33%      -94.5%   -26.64%     -10.43%        -7.66%
-v15_p1           -11.79%     -22.58%     -100.0%   -25.94%      -7.86%        -6.49%
-v16_p2  ★        -10.11%     -18.82%     -100.0%   -24.19%      -5.15%        -3.36%
+eval_results/full/<tag>_vllm/<task>/result.json      mono
+eval_results/translate_wmt22/<tag>_*.json            BLEU + COMET
+eval_results/ppl/<tag>.json                          固定切片 loss
 ```
 
-v16 is best across all metrics. Notable: `gsm8k` is essentially zero for every
-trained ckpt — the 65K piece tokenizer disrupted Qwen3's numerical reasoning
-in a way that P1 frozen-transformer + P2 anneal does not recover. Compare
-ReTok paper (Llama3 tokenizer + 15K Chinese expansion, no vocab replacement):
-mmlu -3.0%, no math collapse.
+后端写在目录名里是硬约定 —— 见上面「不能混后端」。
+
+## 数据集
+
+`python data/prefetch_eval_datasets.py` 一次性拉齐 mono 那六个 benchmark,
+之后可以 `HF_DATASETS_OFFLINE=1` 离线跑。
+
+WMT 测试集不用管 —— `prepare/translate.py` 走 sacrebleu 自带的下载器。
+
+COMET 模型:`make -C data download-comet`,路径从 `data/source.py` 注册表取。
+**`--compute_comet` 必须配 `--save_all_samples`** —— 不加的话脚本只留 5 条
+样本,会 WARN 一句然后跳过 COMET,不报错。
+
+## 为什么是 vLLM 而不是 transformers.generate
+
+transformers 的 generate 在版本之间不稳,曾经因此在 under-trained ckpt 上
+得出过错误结论。vLLM 的生成路径独立于 transformers 版本。
+
+代价是贪心解码不可复现(见上)。关掉 `enable_prefix_caching` 和异步调度大概
+能确定化,但那会让新数字与 `eval_results/` 里已有的 tag 不可比 —— 没有采纳,
+只把可复现性的代价记下来。
+
+## 单卡
+
+本机一张 RTX 4090。旧版本 `retro_eval_*.py` 的 `--gpus 0 1` 是 2× A6000 时代
+的分片,已删。`sweep.py` 顺序跑。

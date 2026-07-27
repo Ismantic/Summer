@@ -262,7 +262,7 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
     """
     Non-distributed variant of MuonWithAuxAdam.
 
-    Set update_fn=aurora_update (from core/aurora.py) instead of the default
+    Set update_fn=aurora_update (定义在本文件下半部分) instead of the default
     muon_update to switch the Muon groups' update rule. The signature is
     identical: (grad, momentum, beta) -> update tensor.
 

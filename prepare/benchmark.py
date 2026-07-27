@@ -15,7 +15,7 @@ AutoTokenizer); we register a fresh TemplateLM subclass that wires
 piece_tokenizer encode/decode through vLLM's skip_tokenizer_init mode.
 
 CLI mirrors eval_with_piece.py:
-    python evals/eval_with_piece_vllm.py --model_path ./HY-MT1.5-1.8B-new-tok \
+    python prepare/benchmark.py --model_path output/phase2_ckpt_v18_tie \
         --task piqa --num_fewshot 5 --output_path ./eval_results/piqa
 """
 import argparse

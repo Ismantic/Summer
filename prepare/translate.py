@@ -7,7 +7,7 @@ Tokenization still uses our piece_tokenizer (we pass prompt_token_ids directly).
 COMET evaluation reuses the same code path as the transformers version.
 
 Usage (mirrors eval_pretrain_translate.py):
-    python evals/eval_pretrain_translate_vllm.py \\
+    python prepare/translate.py \\
         --model_path /path/to/ckpt --output_path /path/out/wmt22.json \\
         --max_samples 1000 --batch_size 64 \\
         --compute_comet --save_all_samples

@@ -60,15 +60,19 @@ class Source:
     """一个可下载的数据源。
 
     kind:
-      hf           HF 数据集,按 allow_patterns 选文件、按 n_parts 截断
-      hf-snapshot  HF 数据集,整仓下载(小仓库)
-      hf-model     HF 模型仓库(COMET 打分模型)
+      hf           按 allow_patterns 选文件、按 n_parts 截断
+      hf-snapshot  整仓下载(小仓库)
+
+    repo_type 单独指定 "dataset" / "model",与 kind 正交。
     """
     name: str
     kind: str
     repo_id: str
     subdir: str                       # 相对 DATA_ROOT
     part_glob: str                    # 相对 dir(),用来数 present()
+    # HF 上的仓库类型。**不要从 kind 推断** —— 一个模型仓库照样可以整仓下载
+    # (kind="hf-snapshot"),按数据集去请求会 404。
+    repo_type: str = "dataset"
     n_parts: int | None = None        # None = 全量
     allow_patterns: list[str] = field(default_factory=list)
     lang: str = ""                    # en / zh / ""
@@ -203,8 +207,17 @@ PRETRAIN_SOURCES = {
 # mono 六个 benchmark 由 `data/prefetch_eval_datasets.py` 从 HF 拉。
 
 EVAL_SOURCES = {
+    "qwen_base": Source(
+        name="qwen_base", kind="hf-snapshot", repo_id="Qwen/Qwen3-1.7B-Base",
+        repo_type="model",
+        subdir="Qwen3-1.7B-Base", part_glob="*.safetensors", n_parts=None,
+        note="ReTok 的起点,也是所有对照的基线模型(~3.4GB)。"
+             "`make -C prepare retok` 和评测 base 都要它。"
+             "**这是必需输入,不是可选** —— 之前没登记是个疏漏。",
+    ),
     "comet": Source(
-        name="comet", kind="hf-model", repo_id="Unbabel/wmt22-comet-da",
+        name="comet", kind="hf-snapshot", repo_id="Unbabel/wmt22-comet-da",
+        repo_type="model",
         subdir="comet-wmt22-da", part_glob="checkpoints/*.ckpt", n_parts=None,
         note="COMET 打分模型(~400MB)。prepare/translate.py --compute_comet 要用。",
     ),

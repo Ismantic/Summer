@@ -56,7 +56,7 @@ def _glob_to_re(pat: str) -> re.Pattern:
 
 
 def _repo_type(src: source.Source) -> str:
-    return "model" if src.kind == "hf-model" else "dataset"
+    return src.repo_type
 
 
 def probe_one(src: source.Source, dry: bool) -> bool:
@@ -95,7 +95,7 @@ def probe_one(src: source.Source, dry: bool) -> bool:
         print(f"  !! 下载失败:{type(e).__name__}: {str(e)[:120]}")
         return False
 
-    if src.kind == "hf-model":
+    if src.repo_type == "model":
         print(f"  ok  {(dest / first).stat().st_size / 1e6:.0f}MB")
         return True
 

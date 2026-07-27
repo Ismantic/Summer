@@ -7,7 +7,14 @@
   4. embedding 映射与 replace_tokenizer 的规则一致（抽查）
   5. 模型 forward 数值正常（无 NaN/Inf）
 
-用法: ~/.venv/bin/python analysis/verify_retok.py
+    python test/test_retok.py                       # 默认查当前 SOTA ckpt
+    python test/test_retok.py --model_path <dir>    # 查 retok 刚产出的目录
+
+不带 --model_path 时按顺序找:save/sota/v18_p2_tie → output/phase2_ckpt_v18_tie
+→ output/init_retok。都没有就跳过(**不算通过**)。
+
+原版写死了 0.6B 时代的 `~/new/Qwen3-0.6B-Base-new-tok-v2`,
+那两个目录早就不在了 —— 阶段 4 改成走参数 + 注册表。
 """
 import os
 import json
@@ -21,11 +28,39 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 import torch
 import piece_tokenizer as pt
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from prepare.tokenizer import PieceTokenizerWrapper
+from src.model import Qwen3ForCausalLM
 
-NEW_TOK = "~/new/Qwen3-0.6B-Base-new-tok-v2"
-OLD_BASE = "~/new/Qwen3-0.6B-Base"
+
+def _resolve_new_tok():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model_path", default=None)
+    a, _ = ap.parse_known_args()
+    if a.model_path:
+        return a.model_path
+    for c in ("save/sota/v18_p2_tie", "output/phase2_ckpt_v18_tie",
+              "output/init_retok"):
+        if os.path.exists(os.path.join(ROOT, c, "config.json")):
+            return os.path.join(ROOT, c)
+    return None
+
+
+def _resolve_old_base():
+    """原始 Qwen 基座 —— 从注册表取,取不到就退回 HF repo id。"""
+    from data import source
+    d = source.get("qwen_base").dir()
+    return str(d) if (d / "config.json").exists() else source.get("qwen_base").repo_id
+
+
+NEW_TOK = _resolve_new_tok()
+if NEW_TOK is None:
+    print("跳过:找不到任何换过词表的模型目录"
+          "(save/sota/ 或 output/ 下)。先跑 `make -C prepare retok`。")
+    raise SystemExit(0)
+OLD_BASE = _resolve_old_base()
+print(f"新词表模型  {NEW_TOK}")
+print(f"原始基座    {OLD_BASE}")
 
 _ok = True
 
@@ -100,42 +135,54 @@ check("vocab_size == 81903", tok.vocab_size == 81903, str(tok.vocab_size))
 check("token_mapping.json pad_id == 81899", mapping["pad_id"] == 81899)
 
 # ---- 4. embedding 映射正确性 ----
-section("4. embedding 映射抽查（应与 replace_tokenizer 的 mean-of-BBPE 规则一致）")
-old_tok = AutoTokenizer.from_pretrained(OLD_BASE, trust_remote_code=True)
-old_emb = AutoModelForCausalLM.from_pretrained(
-    OLD_BASE, dtype=torch.bfloat16).model.embed_tokens.weight.data
-new_model = AutoModelForCausalLM.from_pretrained(NEW_TOK, dtype=torch.bfloat16)
+#
+# **只对刚做完手术、一步都没训过的模型成立。** 训练会把嵌入挪走,拿训练过的
+# checkpoint(比如 v18)来比会 100% 不符 —— 那不是 bug,是这项检查不适用。
+# 所以默认跳过,要查得显式加 --check_embeddings(通常紧跟 `make -C prepare retok`)。
+new_model = Qwen3ForCausalLM.from_pretrained(NEW_TOK, dtype=torch.bfloat16)
 new_emb = new_model.model.embed_tokens.weight.data
 
-random.seed(0)
-mism = checked = one2one = multi = 0
-for i in random.sample(range(3, 81899), 300):
-    try:
-        piece = cn.id_to_piece(i)
-    except Exception:
-        continue
-    if piece in ("<unk>", "<s>", "</s>"):
-        continue
-    text = piece.replace("▁", " ") or " "
-    if not text.strip():
-        text = " "
-    old_ids = old_tok.encode(text, add_special_tokens=False)
-    if not old_ids:
-        continue
-    expected = old_emb[old_ids].float().mean(0).to(old_emb.dtype)
-    if not torch.equal(expected, new_emb[i]):
-        mism += 1
-    checked += 1
-    one2one += (len(old_ids) == 1)
-    multi += (len(old_ids) > 1)
-check(f"embedding 映射抽查 {checked} 个 (one2one={one2one}, multi={multi})",
-      mism == 0, f"{mism} 个与规则不符")
+import argparse as _ap
+_a, _ = _ap.ArgumentParser(add_help=False).parse_known_args()
+_check_emb = "--check_embeddings" in sys.argv
+section("4. embedding 映射抽查（mean-of-BBPE 规则）")
+if not _check_emb:
+    print("  跳过 —— 这项只对未训练的 retok 产物有意义,加 --check_embeddings 开启")
+else:
+  from transformers import AutoModelForCausalLM, AutoTokenizer
+  old_tok = AutoTokenizer.from_pretrained(OLD_BASE, trust_remote_code=True)
+  old_emb = AutoModelForCausalLM.from_pretrained(
+      OLD_BASE, dtype=torch.bfloat16).model.embed_tokens.weight.data
+
+  random.seed(0)
+  mism = checked = one2one = multi = 0
+  for i in random.sample(range(3, 81899), 300):
+      try:
+          piece = cn.id_to_piece(i)
+      except Exception:
+          continue
+      if piece in ("<unk>", "<s>", "</s>"):
+          continue
+      text = piece.replace("▁", " ") or " "
+      if not text.strip():
+          text = " "
+      old_ids = old_tok.encode(text, add_special_tokens=False)
+      if not old_ids:
+          continue
+      expected = old_emb[old_ids].float().mean(0).to(old_emb.dtype)
+      if not torch.equal(expected, new_emb[i]):
+          mism += 1
+      checked += 1
+      one2one += (len(old_ids) == 1)
+      multi += (len(old_ids) > 1)
+  check(f"embedding 映射抽查 {checked} 个 (one2one={one2one}, multi={multi})",
+        mism == 0, f"{mism} 个与规则不符")
 
 # ---- 5. 模型 forward 数值 ----
 section("5. 模型 forward 数值")
 ids = tok.encode("机器翻译 hello world 深度学习模型", add_special_tokens=True)
 with torch.no_grad():
-    logits = new_model(torch.tensor([ids])).logits
+    logits = new_model(torch.tensor([ids]))
 check("logits 形状 (1, L, 81903)", tuple(logits.shape) == (1, len(ids), 81903),
       str(tuple(logits.shape)))
 check("logits 全部有限（无 NaN/Inf）", bool(torch.isfinite(logits).all()))

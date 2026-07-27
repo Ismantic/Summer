@@ -13,7 +13,7 @@ For a base model, <user>/<assistant>/<system> are unused at eval time;
 we still initialize them from Qwen's <|im_start|> for sanity.
 
 Usage:
-    python tools/replace_tokenizer.py \
+    python prepare/retok.py \
         --old_model_path ./Qwen/Qwen3-0.6B-Base \
         --new_tokenizer_path ./Qwen/piece_mt.model \
         --output_path ./Qwen/Qwen3-0.6B-Base-new-tok

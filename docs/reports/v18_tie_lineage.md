@@ -1,5 +1,13 @@
 # v18 Tie Model Lineage
 
+> **写于四层改造之前(2026-07-27 之前)。** 里面的文件路径都已过期 ——
+> `core/` `evals/` `train/` `data_prep/` `runs/` 这些目录不存在了,对应关系见
+> `docs/WHY.md`。**内容保留原样,作为历史记录。**
+>
+> 另外:里面凡是拿 0.1 以内的 BLEU 差做的比较都落在噪声内。vLLM 的贪心解码
+> 不可复现,同一 ckpt 跑 6 次 BLEU 的 range 是 0.10–0.13(zh-en)/ 0.13(en-zh)。
+> 见 `docs/WHY.md` 第二节。
+
 This document records how `~/Shiyu/Summer/output/phase2_ckpt_v18_tie`
 was produced, what data and commands were used, and how each stage performed.
 
