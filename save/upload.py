@@ -51,6 +51,57 @@ IGNORE = ["__pycache__/**", "**/__pycache__/**", "**/*.pyc", ".cache/**"]
 WEIGHTS = ["model.safetensors"]
 
 
+def _write_token():
+    """取一个有 write 权限的 token,拿不到就说清楚为什么。
+
+    **`HF_TOKEN` 环境变量会盖掉 `huggingface-cli login` 存的那个。** 2026-07-27
+    踩过:login 用的是 write token,但 shell 里有个只读的 `HF_TOKEN`,于是上传
+    403 —— 报的是「you must use a write token」,不会告诉你 token 是从哪来的,
+    看着像 login 没生效。
+
+    所以这里把两个来源都试一遍,挑有 write 的那个,并且**说明用的是哪一个**。
+    """
+    from huggingface_hub import HfApi, constants
+
+    cands = []
+    if os.environ.get("HF_TOKEN"):
+        cands.append(("HF_TOKEN 环境变量", os.environ["HF_TOKEN"]))
+    # **不能用 get_token()** —— 它自己也优先读 HF_TOKEN,于是两个候选是同一个,
+    # login 存的那份永远试不到,正好错过我们要找的那个。直接读文件。
+    try:
+        stored = Path(constants.HF_TOKEN_PATH).read_text().strip()
+    except OSError:
+        stored = ""
+    if stored and not any(stored == t for _, t in cands):
+        cands.append(("huggingface-cli login 存的", stored))
+    if not cands:
+        print("没有 token。先跑 `huggingface-cli login`(要 write 权限)。")
+        return None
+
+    roles = []
+    for src, tok in cands:
+        try:
+            info = HfApi(token=tok).whoami()
+        except Exception as e:                                  # noqa: BLE001
+            # 网络抖动和 token 无效要分开说 —— 前者重试就好
+            print(f"  {src}:查不到权限({type(e).__name__})")
+            roles.append((src, tok, None))
+            continue
+        role = info.get("auth", {}).get("accessToken", {}).get("role")
+        name = info.get("auth", {}).get("accessToken", {}).get("displayName", "?")
+        print(f"  {src}:{info['name']} / {name} / 权限 {role}")
+        roles.append((src, tok, role))
+
+    for src, tok, role in roles:
+        if role == "write":
+            print(f"  → 用「{src}」上传")
+            return tok
+    print("\n没有 write 权限的 token。"
+          "\n  最常见的原因:shell 里有个只读的 HF_TOKEN,把 login 存的那个盖掉了。"
+          "\n  要么 `unset HF_TOKEN`,要么把它换成 write token。")
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -65,6 +116,10 @@ def main() -> int:
 
     if os.environ.get("HF_ENDPOINT", "").rstrip("/").endswith("hf-mirror.com"):
         print("HF_ENDPOINT 指向 hf-mirror(只读镜像),上传会失败。先 unset。")
+        return 1
+
+    token = _write_token()
+    if token is None:
         return 1
 
     by_name = {r.repo_id.split("/")[-1]: r for r in RELEASES}
@@ -100,7 +155,7 @@ def main() -> int:
             continue
 
         from huggingface_hub import HfApi
-        api = HfApi()
+        api = HfApi(token=token)
         api.create_repo(repo_id=repo_id, repo_type="model",
                         private=a.private, exist_ok=True)
         api.upload_folder(
