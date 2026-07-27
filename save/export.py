@@ -64,7 +64,7 @@ bundled wrapper:
 ```python
 from tokenizer import PieceTokenizerWrapper
 tok = PieceTokenizerWrapper(".")          # the directory holding these files
-ids = tok.encode("中国科学院计算技术研究所在北京")
+ids = tok.encode("机器翻译的基本任务是")
 ```
 
 **Keep `Summer-Tokenizer.dict.txt` next to `Summer-Tokenizer.pt`.** Without it
@@ -87,7 +87,7 @@ from tokenizer import PieceTokenizerWrapper
 tok = PieceTokenizerWrapper(".")
 llm = LLM(model=".", skip_tokenizer_init=True, dtype="bfloat16")
 
-ids = tok.encode("中国科学院计算技术研究所", add_special_tokens=False)
+ids = tok.encode("机器翻译的基本任务是", add_special_tokens=False)
 out = llm.generate([TokensPrompt(prompt_token_ids=ids)],
                    SamplingParams(temperature=0.0, max_tokens=64,
                                   stop_token_ids=[tok.eos_token_id]))
@@ -211,7 +211,7 @@ model = Qwen3ForCausalLM.from_pretrained(
     HERE, device="cuda" if torch.cuda.is_available() else "cpu",
     dtype=torch.bfloat16)
 
-prompt = "中国科学院计算技术研究所"
+prompt = "机器翻译的基本任务是"
 ids = tok.encode(prompt, add_special_tokens=False)
 print(f"{prompt!r} -> {len(ids)} tokens")
 
@@ -263,8 +263,8 @@ llm = LLM(model=HERE, skip_tokenizer_init=True, dtype="bfloat16",
           trust_remote_code=True)
 
 prompts = [
-    "中国科学院计算技术研究所",
-    "The capital of France is",
+    "机器翻译的基本任务是",
+    "中文分词的目标是",
 ]
 
 outputs = llm.generate(

@@ -389,6 +389,29 @@ key 是我们与 vLLM / transformers 之间**唯一的契约**。改了它,vLLM 
 换 3.11 就露馅:产出 `cpython-314` 的名字,setuptools 在等 `cpython-311`,
 报的错却是「.so 不存在」。见 `prepare/install_deps.sh` 里的处理。
 
+### venv 改名会留下 venv 外面的死引用
+
+`~/.venv-eval` 改名成 `~/.venv-e` 时,修了 venv 内部 68 个文件的路径
+(`bin/` 的 shebang + `pyvenv.cfg`),`lib/` 下确认干净,以为完了。**不是** ——
+JIT 编译缓存在 venv 外面:
+
+    ~/.cache/flashinfer/.../build.ninja    写死旧路径 → vLLM 引擎起不来
+    ~/.cache/vllm/torch_compile_cache/     6644 个文件提到旧路径(实测无害)
+    ~/.triton/                             30 个文件同上
+
+报错长这样,跟改名一点关系看不出来:
+
+    ninja: error: '~/.venv-eval/lib/python3.11/.../sampling.cu',
+    needed by 'csrc_sampling.cuda.o', missing and no known rule to make it
+    RuntimeError: Engine core initialization failed
+
+**整个 vLLM 评测栈都是坏的,而训练和 `make test` 五项全绿** —— 因为它们不碰
+vLLM。所以「测试全过」不等于「改名没出事」。修法:`rm -rf ~/.cache/flashinfer`,
+它会自己重建。3.8GB 的 `~/.cache/vllm` 不用动,那里面的旧路径是惰性记录。
+
+一般规律:**改动解释器路径之后,要把用它的每条链路都真跑一遍**,而不只是跑
+测试 —— 编译缓存、`.pth`、egg-link、外部工具的配置都可能留着旧路径。
+
 教训两条:
 
 - `uv pip install --dry-run <A>` 的结果**不代表** `install <A> <B>` 的结果。
