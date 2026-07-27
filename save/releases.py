@@ -20,12 +20,21 @@ class Release:
     local: str                      # 相对仓库根,产出这份发布的 checkpoint
     stage: str
     note: str = ""
+    # 发布目录(export 的产物)。核对 sha256 用这个,不用 local ——
+    # local 是训练产出的 checkpoint,里面的词表还是旧名 piece.model;
+    # 发布目录里才是上游名。两者内容相同,文件名不同。
+    # 留空则按 save/releases/<repo 名> 推。
+    release: str = ""
     # 关键文件的 sha256。核对用 —— 发布之后本地和线上必须一致,
     # 不一致说明有一边被动过。
     sha256: dict[str, str] = field(default_factory=dict)
 
     def local_dir(self) -> Path:
         return ROOT / self.local
+
+    def release_dir(self) -> Path:
+        return ROOT / (self.release
+                       or f"save/releases/{self.repo_id.split('/')[-1]}")
 
 
 RELEASES = [
@@ -38,7 +47,9 @@ RELEASES = [
         sha256={
             "model.safetensors":
                 "b8676b8410d661bf9879612786c8980aae72250ecb87cb375a604e724133162a",
-            "piece.model":
+            # 词表用上游名(与 PieceTokenizer 仓库 save/ 下同名)。
+            # 2026-07-27 之前线上叫 piece.model,内容相同 —— 那次改名把旧名删了。
+            "Summer-Tokenizer.pt":
                 "b9b81cefcaa5d47cd3aa6e653dda0a80f90b7863b3cfff790dfc07c662dda50f",
         },
     ),
@@ -51,7 +62,10 @@ def cmd_list() -> None:
         print(f"\n{r.repo_id}")
         print(f"  https://huggingface.co/{r.repo_id}")
         print(f"  阶段    {r.stage}")
-        print(f"  本地    {r.local}  {'(在)' if d.exists() else '(**不在**)'}")
+        rd = r.release_dir()
+        print(f"  源 ckpt {r.local}  {'(在)' if d.exists() else '(**不在**)'}")
+        print(f"  发布目录 {rd.relative_to(ROOT)}  "
+              f"{'(在)' if rd.exists() else '(**不在** —— 先 make -C save export)'}")
         if r.note:
             print(f"  说明    {r.note}")
 
@@ -75,7 +89,8 @@ def cmd_verify() -> int:
                   for s in info.siblings}
         for name, expect in r.sha256.items():
             got_remote = remote.get(name)
-            local_f = r.local_dir() / name
+            # 与线上比就该拿发布目录比 —— 文件名一致
+            local_f = r.release_dir() / name
             got_local = (hashlib.sha256(local_f.read_bytes()).hexdigest()
                          if local_f.exists() else None)
             same_r = got_remote == expect
