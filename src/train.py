@@ -1,8 +1,16 @@
 """
-ReTok 两阶段训练的入口。**只依赖 torch。**
+训练入口。**只依赖 torch。** 两条路线共用它:
 
-  Phase 1  --freeze_transformer   只训 embed_tokens + lm_head
-  Phase 2  --use_lora             transformer 走低秩旁路,embed 全参训
+  ReTok(继续预训练,起点是 Qwen3-1.7B-Base 换完词表的模型)
+    Phase 1  --freeze_transformer   只训 embed_tokens + lm_head
+    Phase 2  --use_lora             transformer 走低秩旁路,embed 全参训
+
+  Summer-0.5B(从零预训练,起点是随机初始化的 0.6B 架构)
+    全参数训练,--lr_schedule wsd + --param_dtype float32 + --ce_chunk 4096
+
+两条路线对精度和调度的要求相反,别把默认值弄混:**默认值仍然是 ReTok 那套**
+(bf16 参数 + cosine),从零训练要显式加上面三个开关。理由写在各自的
+add_argument 帮助里。
 
 模型、LoRA、优化器、safetensors 读写都是自己实现的(src/ 下),不依赖
 transformers 和 peft。分词器在 prepare/ —— src/ 不碰文本,只读预编码好的 id。
@@ -48,17 +56,73 @@ def _copy_tokenizer_artifacts(src_dir, dst_dir):
 
 
 class PreTokenizedDataset(Dataset):
-    """Pre-tokenized dataset from a .pt file (shape: [N, seq_len], dtype: int32)."""
-    def __init__(self, pt_file):
-        self.data = torch.load(pt_file, weights_only=True).long()
-        print(f"[PreTok] Loaded {self.data.shape[0]} chunks from {pt_file}, seq_len={self.data.shape[1]}", flush=True)
+    """预编码 .pt(形状 [N, seq_len],dtype int32)。**内存映射,不整份读进内存。**
+
+    原来是 `torch.load(...).long()` —— 一次性读进内存,还顺手转成 int64 把体积
+    翻倍。ReTok 的 1B token 是 4GB → 8GB,本机 61GB 撑得住;从零预训练要
+    12B token(48GB → 96GB),**在训练开始前就 OOM,一步都没跑、什么都没存**。
+
+    改成 mmap:页由内核按需调入,常驻的只有实际访问过的部分,int32→int64 的
+    转换挪到逐条取数据的时候。多个 shard 用逗号分隔,当一份连续数据用 ——
+    12B token 分 12 份,既是为了编码时能并行、断点续,也是为了单个文件别太大。
+    """
+    def __init__(self, pt_files):
+        paths = [p.strip() for p in str(pt_files).split(",") if p.strip()]
+        self.shards, self.starts, total, seq_len = [], [], 0, None
+        for p in paths:
+            t = torch.load(p, weights_only=True, mmap=True)
+            if seq_len is None:
+                seq_len = t.shape[1]
+            elif t.shape[1] != seq_len:
+                raise ValueError(
+                    f"shard 的 seq_len 不一致:{p} 是 {t.shape[1]},前面是 {seq_len}。"
+                    f"混着用会让 position_ids 和 batch 形状对不上。")
+            self.shards.append(t)
+            self.starts.append(total)
+            total += t.shape[0]
+        self.total, self.seq_len = total, seq_len
+        print(f"[PreTok] mmap {len(paths)} 个 shard | {total:,} chunks × {seq_len} "
+              f"= {total * seq_len:,} token", flush=True)
 
     def __len__(self):
-        return self.data.shape[0]
+        return self.total
 
     def __getitem__(self, index):
-        tokens = self.data[index]
-        return dict(input_ids=tokens, labels=tokens.clone(), attention_mask=torch.ones_like(tokens, dtype=torch.bool))
+        # 从后往前找所属 shard —— shard 数是十几个,线性扫比二分更简单也够快
+        for start, shard in zip(reversed(self.starts), reversed(self.shards)):
+            if index >= start:
+                tokens = shard[index - start].long()
+                break
+        return dict(input_ids=tokens, labels=tokens.clone(),
+                    attention_mask=torch.ones_like(tokens, dtype=torch.bool))
+
+
+def chunked_cross_entropy(logits, targets, chunk=0):
+    """按行分块算 next-token CE。**显存瓶颈在这里,不在模型。**
+
+    词表 81903 的时候 `logits.float()` 本身就是大头:batch 16 × seq 1023 时
+    这一份 float 副本要 5.4GB,cross_entropy 内部的 log_softmax 再要一份。
+    实测(0.5B / seq 1024 / 4090 24GB):
+
+        整份算   batch 8 峰值 11.3GiB,batch 16 直接 OOM
+        分块算   batch 8 峰值 10.1GiB,batch 16 能跑(16.8GiB),吞吐还 +8%
+
+    数值口径与 `F.cross_entropy(logits.float(), targets)` 一致:每块用
+    reduction="sum" 累加,最后除以有效 token 数。**除数是有效数不是总数** ——
+    用总数会把 IGNORE_INDEX 的位置也算进分母,loss 系统性偏低而不报错。
+
+    chunk<=0 时退回整份计算(短序列/小词表下没必要分块)。
+    """
+    n_valid = (targets != IGNORE_INDEX).sum()
+    if chunk <= 0:
+        return torch.nn.functional.cross_entropy(
+            logits.float(), targets, ignore_index=IGNORE_INDEX)
+    total = logits.new_zeros((), dtype=torch.float32)
+    for i in range(0, logits.size(0), chunk):
+        total = total + torch.nn.functional.cross_entropy(
+            logits[i:i + chunk].float(), targets[i:i + chunk],
+            ignore_index=IGNORE_INDEX, reduction="sum")
+    return total / n_valid.clamp(min=1)
 
 
 def collate_fn(batch, pad_token_id):
@@ -142,8 +206,29 @@ def train(args):
             "  要么给 Attention 加上 mask 支持,要么用 --mode clm。\n"
             "  v18 的复现路径是 clm + 预编码 .pt,不受影响。")
 
+    # 续训:权重从 checkpoint 目录加载,超参仍然从命令行来。
+    # **不从 train_state 里恢复超参** —— WSD 的用法就是拿新的 max_steps 续跑,
+    # 恢复旧超参会让「改主意」这件事失效。恢复的只有轨迹状态。
+    resume_state = None
+    load_dir = args.model_path
+    if args.resume_from:
+        load_dir = args.resume_from
+        state_file = os.path.join(args.resume_from, "train_state.pt")
+        if not os.path.exists(state_file):
+            raise FileNotFoundError(
+                f"{state_file} 不在 —— 这个 checkpoint 是老版本存的,只有权重。\n"
+                f"  从它续训会丢掉优化器动量和数据位置,轨迹对不上。\n"
+                f"  要么从带 train_state.pt 的 checkpoint 续,要么用 --model_path 重头开始。")
+        resume_state = torch.load(state_file, weights_only=False, map_location="cpu")
+        args.seed = resume_state["seed"]
+        log(f"[resume] 从 {args.resume_from} 续:step {resume_state['step']}, "
+            f"epoch {resume_state['epoch']}, 本 epoch 已吃 {resume_state['consumed']:,} chunk")
+
+    torch.manual_seed(args.seed)
+    param_dtype = {"bfloat16": torch.bfloat16, "float32": torch.float32}[args.param_dtype]
     model = Qwen3ForCausalLM.from_pretrained(
-        args.model_path, device=device, dtype=torch.bfloat16)
+        load_dir, device=device, dtype=param_dtype)
+    log(f"参数精度 {args.param_dtype}(计算恒为 bf16 autocast)")
     model.train()
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
@@ -228,20 +313,33 @@ def train(args):
             f"  src/ 不碰文本 —— 分词属于 prepare/ 那一层。")
     dataset = PreTokenizedDataset(args.train_data)
 
-    is_iterable = isinstance(dataset, torch.utils.data.IterableDataset)
     sampler = None
-    if is_distributed and not is_iterable:
+    if is_distributed:
         sampler = torch.utils.data.distributed.DistributedSampler(
             dataset, shuffle=True, drop_last=True
         )
-    elif is_distributed and is_iterable:
-        raise NotImplementedError("DDP + IterableDataset not supported; pretokenize first")
-    dataloader = DataLoader(
-        dataset, batch_size=args.batch_size,
-        shuffle=(sampler is None and not is_iterable),
-        sampler=sampler, num_workers=0,
-        collate_fn=lambda batch: collate_fn(batch, pad_token_id),
-    )
+
+    # **数据顺序显式生成,不用 DataLoader 的 shuffle。**
+    #
+    # shuffle=True 时的排列藏在 DataLoader 内部,续训时没法「跳过前面吃过的
+    # 那些 chunk」—— 只能从头再来一遍,于是断一次就重复喂一批数据。12B token
+    # 的跑动里这不是小事:重复的部分等于白训,而且**看不出来**。
+    #
+    # 自己按 (seed, epoch) 生成排列,续训时切片跳过即可,轨迹与不中断完全一致。
+    def epoch_order(epoch: int) -> list[int]:
+        g = torch.Generator().manual_seed(args.seed * 1000003 + epoch)
+        return torch.randperm(len(dataset), generator=g).tolist()
+
+    def make_loader(epoch: int, consumed: int):
+        order = None if sampler is not None else epoch_order(epoch)[consumed:]
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+        return DataLoader(
+            dataset, batch_size=args.batch_size,
+            sampler=sampler if sampler is not None else order,
+            num_workers=args.num_workers,
+            collate_fn=lambda batch: collate_fn(batch, pad_token_id),
+        )
 
     # Optimizer (build on raw model so param names don't have DDP "module." prefix)
     optimizer = build_optimizer(raw_model, args.muon_lr, args.adam_lr, args.muon_momentum, args.weight_decay,
@@ -254,6 +352,22 @@ def train(args):
     def lr_lambda(step):
         if step < args.warmup_steps:
             return step / max(1, args.warmup_steps)
+        # WSD(warmup-stable-decay):中间一段恒定,只在最后 lr_decay_steps 步退火。
+        #
+        # 从零预训练要跑好几天,而**总步数在开跑的时候其实定不下来** —— 得看
+        # 中途的 few-shot 翻译曲线才知道跑到哪儿够。cosine 把整条曲线绑死在
+        # max_steps 上:想提前收尾,前面那些步就是按错的曲线走的;想延长,
+        # 学习率已经衰到底了,续不动。
+        #
+        # WSD 的恒定段没有这个耦合:改主意时只要用新的 max_steps 续跑,
+        # 前面走过的路一模一样,退火窗口自动落在新的末尾。
+        if args.lr_schedule == "wsd":
+            decay = args.lr_decay_steps or max(1, int(0.1 * args.max_steps))
+            decay_start = args.max_steps - decay
+            if step < decay_start:
+                return 1.0
+            p = min(1.0, (step - decay_start) / max(1, decay))
+            return args.min_lr_ratio + (1.0 - args.min_lr_ratio) * (1.0 - p)
         progress = (step - args.warmup_steps) / max(1, args.max_steps - args.warmup_steps)
         progress = min(1.0, progress)
         if args.lr_schedule == "cosine":
@@ -269,6 +383,7 @@ def train(args):
     model.train()
     step = 0
     micro_step = 0
+    epoch, consumed = 0, 0
     t0 = time.time()
     interrupted = False
 
@@ -278,6 +393,67 @@ def train(args):
             for k, v in st.items():
                 if torch.is_tensor(v):
                     st[k] = v.to(target, non_blocking=False)
+
+    if resume_state is not None:
+        # **优化器状态不能不恢复。** Muon 的动量是 5 步 Newton-Schulz 正交化之后
+        # 的累积量,丢掉它等于让模型在训练中途重新经历一次冷启动 —— loss 会
+        # 明显跳一下再慢慢压回去,而日志上只显示「续训成功」。
+        optimizer.load_state_dict(resume_state["optimizer"])
+        _move_optimizer_state(device)
+        step = resume_state["step"]
+        epoch, consumed = resume_state["epoch"], resume_state["consumed"]
+        # scheduler 是 step 的纯函数,不用存 —— 快进到该在的位置就行。
+        # 这样即使 max_steps 变了(WSD 提前收尾),退火窗口自动落在新末尾。
+        for _ in range(step):
+            scheduler.step()
+        torch.set_rng_state(resume_state["cpu_rng"])
+        if resume_state.get("cuda_rng") is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state(resume_state["cuda_rng"])
+        lrs = ", ".join(f"{g['lr']:.3e}" for g in optimizer.param_groups)
+        log(f"[resume] 优化器状态已恢复 | step {step} | lr [{lrs}]")
+
+    def _save_train_state(save_path, cur_step, cur_epoch, cur_consumed):
+        """权重旁边存下续训需要的全部状态。
+
+        权重本身由 `save_pretrained` 存成 HF 布局(评测和发布只要那一份);
+        这里存的是**只有续训才用得上**的东西,单独一个文件,不污染发布产物。
+        """
+        torch.save({
+            "step": cur_step, "epoch": cur_epoch, "consumed": cur_consumed,
+            "seed": args.seed,
+            "optimizer": optimizer.state_dict(),
+            "cpu_rng": torch.get_rng_state(),
+            "cuda_rng": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+        }, os.path.join(save_path, "train_state.pt"))
+
+    def _prune_checkpoints(keep_last, milestone):
+        """删掉旧 checkpoint,只留最近几份和里程碑。
+
+        每份 = 权重 2.1GB(fp32)+ 优化器状态 2.4GB(Muon 动量 + Adam 两个矩)。
+        45,776 步每 2000 步存一次就是 22 份 ≈ 100GB —— 跑到一半磁盘满,
+        训练进程写 checkpoint 失败,而**前面几天的进度只剩最后一份能用**。
+
+        留里程碑是为了事后能回看轨迹(比如某一段 BLEU 掉了想回去查),
+        只留最近几份的话那些点就永远取不回来了。
+        """
+        if keep_last <= 0:
+            return
+        import re
+        import shutil
+        dirs = []
+        for name in os.listdir(args.output_dir):
+            m = re.fullmatch(r"checkpoint-(\d+)", name)
+            if m:
+                dirs.append((int(m.group(1)), os.path.join(args.output_dir, name)))
+        dirs.sort()
+        keep = {s for s, _ in dirs[-keep_last:]}
+        if milestone > 0:
+            keep |= {s for s, _ in dirs if s % milestone == 0}
+        for s, path in dirs:
+            if s not in keep:
+                shutil.rmtree(path, ignore_errors=True)
+                log(f"[prune] 删掉 checkpoint-{s}(保留最近 {keep_last} 份"
+                    f"{f' + 每 {milestone} 步的里程碑' if milestone > 0 else ''})")
 
     def _inline_eval(current_step):
         """Offload model+optimizer to CPU, run eval subprocess, move back."""
@@ -291,11 +467,17 @@ def train(args):
             dist.barrier()
         # Only main rank runs eval command
         if is_main:
-            cmd = args.inline_eval_cmd.replace("{step}", str(current_step))
+            ckpt = os.path.join(args.output_dir, f"checkpoint-{current_step}")
+            cmd = (args.inline_eval_cmd
+                   .replace("{step}", str(current_step))
+                   .replace("{ckpt}", ckpt))
             log(f"[inline_eval] running: {cmd}")
             t_ev = time.time()
-            os.system(cmd)
-            log(f"[inline_eval] done in {time.time()-t_ev:.0f}s")
+            rc = os.system(cmd)
+            # **失败要说出来。** 中途评测挂了而训练继续跑,表现就是「曲线没更新」——
+            # 很容易当成模型没进步,而不是评测根本没跑起来。
+            log(f"[inline_eval] done in {time.time()-t_ev:.0f}s"
+                + ("" if rc == 0 else f"  **退出码 {rc >> 8} —— 这次评测失败了**"))
         if is_distributed:
             dist.barrier()
         # All ranks move back
@@ -312,14 +494,12 @@ def train(args):
         print(f"\nCtrl+C received at step {step}, saving checkpoint...", flush=True)
     signal.signal(signal.SIGINT, _sigint_handler)
 
-    epoch = 0
     while step < args.max_steps and not interrupted:
-        if sampler is not None:
-            sampler.set_epoch(epoch)
-        epoch += 1
+        dataloader = make_loader(epoch, consumed)
         for batch in dataloader:
             if step >= args.max_steps or interrupted:
                 break
+            consumed += batch["input_ids"].shape[0]
             batch = {k: v.to(device) for k, v in batch.items()}
 
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -327,10 +507,10 @@ def train(args):
                 # 口径与 Qwen3ForCausalLM 一致:左移一位的 next-token CE,
                 # IGNORE_INDEX(-100) 处不计入。
                 logits = model(batch["input_ids"])
-                loss = torch.nn.functional.cross_entropy(
-                    logits[:, :-1].reshape(-1, logits.size(-1)).float(),
+                loss = chunked_cross_entropy(
+                    logits[:, :-1].reshape(-1, logits.size(-1)),
                     batch["labels"][:, 1:].reshape(-1),
-                    ignore_index=IGNORE_INDEX)
+                    chunk=args.ce_chunk)
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
@@ -368,11 +548,27 @@ def train(args):
                         else:
                             raw_model.save_pretrained(save_path)
                         _copy_tokenizer_artifacts(args.model_path, save_path)
+                        _save_train_state(save_path, step, epoch, consumed)
                         print(f"Saved checkpoint to {save_path}", flush=True)
+                        _prune_checkpoints(args.keep_ckpt, args.ckpt_milestone)
                     if is_distributed:
                         dist.barrier()
                     # Inline eval (CPU-offload pattern) if requested
                     _inline_eval(step)
+
+        # 一个 epoch 走完(12B token 的跑动里通常一次都走不完)
+        epoch += 1
+        consumed = 0
+
+    # 被 Ctrl+C 打断也要留下能续的 checkpoint —— 否则「优雅退出」只保住权重,
+    # 优化器动量和数据位置照样丢,下次续训是带着冷启动的假续训。
+    if interrupted and is_main and args.output_dir and not args.use_lora:
+        save_path = os.path.join(args.output_dir, f"checkpoint-{step}")
+        os.makedirs(save_path, exist_ok=True)
+        raw_model.save_pretrained(save_path)
+        _copy_tokenizer_artifacts(args.model_path, save_path)
+        _save_train_state(save_path, step, epoch, consumed)
+        log(f"中断于 step {step},已存可续的 checkpoint:{save_path}")
 
     # Save final model (only main rank).
     # LoRA: 合并回基座,存成标准 HF 布局,评测直接加载。
@@ -433,16 +629,39 @@ if __name__ == "__main__":
                              "and moved back to GPU after it returns. The literal '{step}' in the "
                              "command is replaced with the current step number.")
     parser.add_argument("--resume_from", type=str, default="",
-                        help="(unused placeholder for future resume support — current rolling "
-                             "eval flow uses --inline_eval_cmd instead)")
+                        help="从 checkpoint-N/ 续训:恢复权重、优化器状态、step、"
+                             "RNG 和数据顺序。跑几天的任务必须有这个 —— save_steps "
+                             "只存权重,断了从头再来等于赌全程不断电。")
     parser.add_argument("--lr_total_steps", type=int, default=0,
                         help="(unused placeholder; --max_steps drives cosine in current flow)")
     parser.add_argument("--min_lr_ratio", type=float, default=0.1,
                         help="Floor for the LR schedule, as a fraction of peak LR. Default 0.1 matches "
                              "Llama/Qwen practice (peak/10). Set to 0 to recover old decay-to-zero behavior.")
-    parser.add_argument("--lr_schedule", choices=["cosine", "linear"], default="cosine",
-                        help="LR decay shape after warmup. Default cosine (Llama/Qwen standard). "
-                             "Set 'linear' for older behavior.")
+    parser.add_argument("--lr_schedule", choices=["cosine", "linear", "wsd"], default="cosine",
+                        help="warmup 之后的形状。cosine 是 Llama/Qwen 标准(ReTok 两阶段用它);"
+                             "wsd 恒定到末段再退火,适合总步数没定死的从零预训练。")
+    parser.add_argument("--lr_decay_steps", type=int, default=0,
+                        help="wsd 的退火窗口(最后多少步)。0 = max_steps 的 10%%。")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="初始化、数据顺序、dropout 的种子。--resume_from 会覆盖成"
+                             "存下来的那份,保证续训和不中断跑出来的轨迹一致。")
+    parser.add_argument("--param_dtype", choices=["bfloat16", "float32"], default="bfloat16",
+                        help="参数本身的精度(计算恒为 bf16 autocast)。"
+                             "**从零预训练用 float32** —— bf16 的相对精度是 1/256,"
+                             "退火末段 lr 降到 3e-5 时,单步更新只占权重的 0.15%%,"
+                             "低于 bf16 的分辨率,会被直接舍掉。继续预训练(ReTok "
+                             "两阶段)保持 bfloat16,与 v18 一致。")
+    parser.add_argument("--keep_ckpt", type=int, default=0,
+                        help="只保留最近 N 份 checkpoint(0 = 全留,旧行为)。"
+                             "从零预训练每份 4.5GB、要存 20 多次,不清理会撑爆磁盘。")
+    parser.add_argument("--ckpt_milestone", type=int, default=10000,
+                        help="步数是它的倍数的 checkpoint 不删 —— 事后回看轨迹要用。")
+    parser.add_argument("--num_workers", type=int, default=2,
+                        help="DataLoader 工作进程数。mmap 之后取数据只是页缺失 + "
+                             "int32→int64,开 2 个足够把它和 GPU 计算重叠。")
+    parser.add_argument("--ce_chunk", type=int, default=0,
+                        help="分块算 CE 的块大小(行数)。0 = 不分块。词表 81903 时"
+                             "logits.float() 是显存大头,4096 能把 batch 16 从 OOM 救回来。")
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--logging_steps", type=int, default=1)
