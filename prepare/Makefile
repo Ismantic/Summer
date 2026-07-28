@@ -171,7 +171,9 @@ p2:
 #
 # ## 超参是怎么定的
 #
-# batch 16 × accum 16 × 1024 = 262,144 token/步 → 12B token = 45,776 步。
+# batch 16 × accum 16 × 1024 = 262,144 token/步。实际编出来 11,558,371 chunk
+# (Gutenberg 被 max_line_chars 截断,少了 164M),除以 256 = 45,149 步 ——
+# **正好一个 epoch,不重复喂**。
 # 4090 实测(fp32 参数 + bf16 autocast + 梯度检查点 + compile)20,200 tok/s,
 # 也就是 1.75B token/天 —— 12B 要 6.9 天。
 #
@@ -190,7 +192,7 @@ p2:
 INIT_S   ?= $(OUT)/init_summer05b
 SCRATCH  ?= $(OUT)/scratch_1024.pt
 S0       ?= $(OUT)/summer05b_s0
-S0_STEPS ?= 45776
+S0_STEPS ?= 45149
 S0_BATCH ?= 16
 S0_ACCUM ?= 16
 

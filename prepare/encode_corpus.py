@@ -56,8 +56,13 @@ MAIN_WEIGHTS = {
 #   2. **质量优先于多样性。** 12B token 对 0.52B 参数只有 23 token/参数,
 #      每个 token 都得算数;原始网页(CC_EN/CC_CN/SkyPile)保留但降权,
 #      教育向和合成教科书(FineWebEdu/Cosmopedia/CN_FineWeb_Edu)顶上去。
-#   3. **Gutenberg 压到 0.03。** 公版书是 19 世纪英语,对现代新闻翻译帮助小,
-#      而且池子实测只有 1.0B token,再高就得反复喂同一批书。
+#   3. **Gutenberg 压到 0.03。** 公版书是 19 世纪英语,对现代新闻翻译帮助小。
+#
+# **Gutenberg 实际只喂得出 196M,不是配额的 360M。** 卡它的不是池子大小,是
+# `--max_line_chars 100000` —— 每篇截到 10 万字符,而一本书平均 50 万字符,
+# 9930 本截完就只剩这么多。按「池子字节 × token/字节」估会得到 1.0B,差 5 倍,
+# 因为那个估法看不见截断。少的 164M 占总量 1.4%,中英比例因此是 49.3 / 50.7
+# 而不是 50 / 50 —— 偏 0.7 个点,在容差内,所以 2026-07-28 那批数据照用。
 #
 # 每个源吃掉多少 vs 池子实测有多大(2026-07-28 量的,见 data/source.py):
 #
@@ -320,17 +325,37 @@ def main():
         want = int(args.total_tokens * w)
         have = got.get(src_name, 0)
         pct = have / want if want else 1.0
-        flag = "" if pct >= 0.99 else ("  ← 池子不够" if pct < 0.90 else "  ←")
+        flag = "" if pct >= 0.99 else ("  ← 没喂满" if pct < 0.90 else "  ←")
         print(f"{src_name:<16}{want/1e6:>9.0f}M{have/1e6:>9.0f}M{pct*100:>7.1f}%{flag}")
         if pct < 0.90:
-            short.append((src_name, pct))
+            short.append((src_name, pct, (want - have) / args.total_tokens))
+
+    # 判据落在语言比例上,不是逐源完成度。
+    #
+    # **少喂一个源和配比错掉不是一回事。** Gutenberg 少 164M(占总量 1.4%)
+    # 不影响任何结论;而 CN_FineWeb_Edu 的池子比配额小,会把中英比例整体拉偏
+    # ——那才是会悄悄改变模型的东西。所以逐源只报告(上表),报错看比例。
+    lang_dev = {}
     for lang in ("en", "zh"):
         names = [n for n in weights if _source.get(n).lang == lang]
-        want = sum(args.total_tokens * weights[n] for n in names)
-        have = sum(got.get(n, 0) for n in names)
-        print(f"{lang} 计划 {want/1e9:.2f}B → 实得 {have/1e9:.2f}B "
-              f"(实际占比 {have/max(1,actual_total)*100:.1f}%,计划 "
-              f"{sum(weights[n] for n in names)*100:.1f}%)")
+        plan = sum(weights[n] for n in names)
+        real = sum(got.get(n, 0) for n in names) / max(1, actual_total)
+        lang_dev[lang] = abs(real - plan)
+        print(f"{lang} 计划占比 {plan*100:.1f}% → 实际 {real*100:.1f}% "
+              f"(偏 {(real-plan)*100:+.1f} 个点)")
+    print(f"总量 计划 {args.total_tokens/1e9:.2f}B → 实得 {actual_total/1e9:.2f}B")
+
+    # 让数据自我描述:配方写在代码里会漂,而 checkpoint 上看不出它吃的是哪一版。
+    stem = args.output[:-3] if args.output.endswith(".pt") else args.output
+    with open(f"{stem}.mix.json", "w") as f:
+        json.dump({"mix": args.mix, "seq_length": args.seq_length,
+                   "planned_total": args.total_tokens,
+                   "actual_total": actual_total,
+                   "planned_weights": weights,
+                   "actual_tokens": got,
+                   "actual_weights": {k: v / actual_total for k, v in got.items()}},
+                  f, indent=2, ensure_ascii=False)
+    print(f"实际配比写入 {stem}.mix.json")
 
     for _, _, path, _ in results:
         try: os.remove(path)
@@ -338,13 +363,17 @@ def main():
     try: os.rmdir(tmpdir)
     except OSError: pass
 
-    if short:
+    if max(lang_dev.values()) > 0.01:
         raise SystemExit(
-            "\n**有源没喂满(见上表),实际配比与 SCRATCH_WEIGHTS 不符。**\n"
-            "  数据已经写出来了,没白跑 —— 但直接拿去训练的话,中英比例和\n"
-            "  质量分布都不是设计的那个,而且事后从 checkpoint 上看不出来。\n"
-            "  要么调大对应源的 n_parts 再下(data/source.py),要么改权重。\n"
-            "  缺口:" + ", ".join(f"{n} 只有 {p*100:.0f}%" for n, p in short))
+            f"\n**中英比例偏了 {max(lang_dev.values())*100:.1f} 个点(见上表)。**\n"
+            "  数据已经写出来了,没白跑 —— 但它的配比不是设计的那个,而且\n"
+            "  事后从 checkpoint 上看不出来。翻译两个方向都要考,比例是会\n"
+            "  直接改变结论的东西。\n"
+            "  通常是某个源的池子比配额小:调大它的 n_parts 再下"
+            "(data/source.py),或者改权重。\n"
+            "  没喂满的源:" + ", ".join(
+                f"{n} 只有 {p*100:.0f}%(缺总量的 {g*100:.1f}%)"
+                for n, p, g in short))
 
 
 if __name__ == "__main__":

@@ -48,7 +48,16 @@ def main():
     p.add_argument("--num_fewshot", type=int, default=5)
     p.add_argument("--testset", default="wmt22")
     p.add_argument("--exemplar_set", default="wmt21")
-    p.add_argument("--gpu_mem_util", type=float, default=0.85)
+    # **0.6 而不是 translate.py 的 0.85。**
+    #
+    # 这条路是在训练进程还活着的时候跑的:train.py 把模型和优化器挪到 CPU、
+    # 清了缓存,但 torch.compile / inductor 的那些池子 empty_cache() 未必收得
+    # 干净。而训练稳态本身就占到 23.6/24.0 GiB —— 余量只有 900MB。
+    #
+    # 0.6 × 24GB = 14.4GB,对 0.5B 模型 + 200 条短 prompt 的 KV cache 绰绰有余,
+    # 而 0.85 从来没在「训练进程还在」这个前提下验过。中途评测挂掉不会中断
+    # 训练(只记一条失败),但曲线上就断了一个点,而且要等 7 小时才知道。
+    p.add_argument("--gpu_mem_util", type=float, default=0.6)
     p.add_argument("--python", default=sys.executable)
     a = p.parse_args()
 
