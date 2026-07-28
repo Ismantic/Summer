@@ -179,11 +179,14 @@ PRETRAIN_SOURCES = {
     ),
     "CCI3-HQ": Source(
         name="CCI3-HQ", kind="hf", repo_id="BAAI/CCI3-HQ",
-        subdir="CCI3-HQ", part_glob="data/part_*.jsonl", n_parts=10,
+        subdir="CCI3-HQ", part_glob="data/part_*.jsonl", n_parts=20,
         allow_patterns=["data/part_*.jsonl"], lang="zh", fmt="jsonl",
         note="中文高质量网页(全量 679 文件)。HF 路径与 v18 本地 glob 完全一致。"
              "**这个源是 gated 的** —— 要先在 HF 页面上接受条款,再 "
-             "`huggingface-cli login`(或设 HF_TOKEN),否则下载会 401。",
+             "`huggingface-cli login`(或设 HF_TOKEN),否则下载会 401。"
+             "10 → 20 份是给 Summer-0.5B 的 scratch 配比腾的:实测 10 份 ≈ "
+             "2.6B token,而 scratch 要吃 1.68B,占池子 65% 太挤(采样几乎"
+             "没得选)。ReTok 的 main/anneal 只吃 136M,不受影响。",
     ),
     "CC_CN": Source(
         name="CC_CN", kind="hf", repo_id="HuggingFaceFW/fineweb-2",
@@ -194,10 +197,13 @@ PRETRAIN_SOURCES = {
     "CN_FineWeb_Edu": Source(
         name="CN_FineWeb_Edu", kind="hf",
         repo_id="opencsg/Fineweb-Edu-Chinese-V2.2",
-        subdir="Chinese-FineWeb-Edu-V2.2", part_glob="4_5/*.parquet", n_parts=200,
+        subdir="Chinese-FineWeb-Edu-V2.2", part_glob="4_5/*.parquet", n_parts=800,
         allow_patterns=["4_5/*.parquet"], lang="zh",
         note="中文教育向。只用打分 4_5 的子集(全量 9745)。"
-             "HF 路径与 v18 本地 glob 完全一致。只 anneal 段用,权重 0.25。",
+             "HF 路径与 v18 本地 glob 完全一致。ReTok 只 anneal 段用,权重 0.25。"
+             "200 → 800 份是给 Summer-0.5B 的:实测 200 份只有 0.9B token,"
+             "而 scratch 要吃 1.44B —— **池子比消耗量还小**,不扩就只能少喂,"
+             "而且少喂了不报错,只是中英比例悄悄偏掉。",
     ),
 }
 
@@ -216,6 +222,16 @@ EVAL_SOURCES = {
         note="ReTok 的起点,也是所有对照的基线模型(~3.4GB)。"
              "`make -C prepare retok` 和评测 base 都要它。"
              "**这是必需输入,不是可选** —— 之前没登记是个疏漏。",
+    ),
+    "qwen_base_06b": Source(
+        name="qwen_base_06b", kind="hf-snapshot", repo_id="Qwen/Qwen3-0.6B-Base",
+        repo_type="model",
+        subdir="Qwen3-0.6B-Base", part_glob="*.safetensors", n_parts=None,
+        note="**Summer-0.5B 的架构来源和唯一有意义的对照**(~1.2GB)。"
+             "28L/1024H/3072I/GQA 16:8/head_dim 128,`prepare/init_scratch.py` "
+             "直接读它的 config.json 而不是把数字抄进代码 —— 抄错了不报错。"
+             "同时它也是基线:同架构、同参数预算,但吃了 36T token,"
+             "而本项目从零训练只跑得起 ~12B。",
     ),
     "retok_model": Source(
         name="retok_model", kind="hf-snapshot",
