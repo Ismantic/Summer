@@ -8,6 +8,11 @@
 #   make p1         Phase 1:冻结 transformer,只训 embed + lm_head(25 小时)
 #   make p2         Phase 2:LoRA tie-safe(v18 SOTA 的配方,5 小时)
 #
+#   ---- Summer-0.5B:从零预训练,与上面 ReTok 是独立的一条线 ----
+#   make init-scratch    随机初始化的起点(Qwen3-0.6B-Base 架构 + 81903 词表)
+#   make encode-scratch  预编码 12B token / 中英各半 / 分 shard(3 小时)
+#   make s0              长跑约 6 天,每 2000 步自动测一次 WMT22 5-shot BLEU
+#
 #   24GB 卡上要降 batch:make p1 BATCH=4 ACCUM=64 / make p2 BATCH=4 ACCUM=32
 #
 #   make bench      mono 六任务(vLLM + lm_eval)
@@ -153,6 +158,87 @@ p2:
 	    --max_steps 1500 --warmup_steps 200 \
 	    --muon_lr 5e-5 --adam_lr 5e-5 --min_lr_ratio 0.01 --lr_schedule cosine \
 	    --max_grad_norm 1.0 --use_aurora --save_steps 500 --logging_steps 50
+
+# ---------------------------------------------------------------- Summer-0.5B
+#
+# 从零预训练。与上面 ReTok 的 p1/p2 **是两条独立的线**,共用的只有词表、
+# 语料池和 src/train.py。
+#
+#   make init-scratch     造随机初始化的起点(读 Qwen3-0.6B-Base 的 config)
+#   make encode-scratch   预编码 12B token,分 shard(约 3 小时,48GB)
+#   make s0               长跑(约 6 天),中途每 2000 步自动测 WMT22 5-shot BLEU
+#   make s0-resume STEP=N 从 checkpoint-N 续
+#
+# ## 超参是怎么定的
+#
+# batch 16 × accum 16 × 1024 = 262,144 token/步 → 12B token = 45,776 步。
+# 4090 实测(fp32 参数 + bf16 autocast + 梯度检查点 + compile)20,200 tok/s,
+# 也就是 1.75B token/天 —— 12B 要 6.9 天。
+#
+# **batch 16 必须配梯度检查点。** 不开的话 batch 只能到 8,而且峰值 21.2GiB,
+# 24GB 卡上只剩 2.8G 余量,跑一周碰上碎片化就前功尽弃。开检查点后 17.8GiB
+# (fp32 参数再加 2.7G),换来 20% 的吞吐损失,值。
+#
+# **--param_dtype float32 不能省。** 见 src/train.py 里那条帮助。
+# **--ce_chunk 4096 不能省。** 词表 81903 时 logits.float() 是显存大头,
+# 不分块的话 batch 16 直接 OOM。
+#
+# weight_decay 保持 0(与 v18、与 modded-nanogpt 一致)。想开的话注意
+# build_optimizer 把 RMSNorm(ndim==1)也归进了 Adam 组 —— 直接加 wd 会把
+# norm 权重从 1 往 0 拽,那是有害的,得先给它单开一组。
+
+INIT_S   ?= $(OUT)/init_summer05b
+SCRATCH  ?= $(OUT)/scratch_1024.pt
+S0       ?= $(OUT)/summer05b_s0
+S0_STEPS ?= 45776
+S0_BATCH ?= 16
+S0_ACCUM ?= 16
+
+# 训练时把所有 shard 逗号拼起来喂进去(train.py 会 mmap 它们)
+SCRATCH_SHARDS = $(shell ls $(OUT)/scratch_1024.s*.pt 2>/dev/null | paste -sd,)
+
+.PHONY: init-scratch encode-scratch s0 s0-resume
+
+init-scratch:
+	$(PY) $(HERE)init_scratch.py --output_path $(INIT_S)
+
+encode-scratch:
+	$(PY) $(HERE)encode_corpus.py --mix scratch \
+	    --tokenizer_model $(PIECE) --cn_dict $(CN_DICT) \
+	    --output $(SCRATCH) --total_tokens 12000000000 --seq_length 1024 \
+	    --shard_output
+
+s0:
+	$(PY) $(ROOT)/src/train.py \
+	    --model_path $(INIT_S) --train_data "$(SCRATCH_SHARDS)" --mode clm \
+	    --output_dir $(S0) \
+	    --max_seq_length 1024 --batch_size $(S0_BATCH) \
+	    --gradient_accumulation_steps $(S0_ACCUM) \
+	    --gradient_checkpointing --compile \
+	    --param_dtype float32 --ce_chunk 4096 \
+	    --max_steps $(S0_STEPS) --warmup_steps 2000 \
+	    --lr_schedule wsd --lr_decay_steps $$(( $(S0_STEPS) / 10 )) \
+	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
+	    --max_grad_norm 1.0 --seed 42 \
+	    --save_steps 2000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
+	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S0)/bleu_curve.jsonl'
+
+# 断了之后接着跑:make s0-resume STEP=12000
+s0-resume:
+	$(PY) $(ROOT)/src/train.py \
+	    --model_path $(INIT_S) --resume_from $(S0)/checkpoint-$(STEP) \
+	    --train_data "$(SCRATCH_SHARDS)" --mode clm \
+	    --output_dir $(S0) \
+	    --max_seq_length 1024 --batch_size $(S0_BATCH) \
+	    --gradient_accumulation_steps $(S0_ACCUM) \
+	    --gradient_checkpointing --compile \
+	    --param_dtype float32 --ce_chunk 4096 \
+	    --max_steps $(S0_STEPS) --warmup_steps 2000 \
+	    --lr_schedule wsd --lr_decay_steps $$(( $(S0_STEPS) / 10 )) \
+	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
+	    --max_grad_norm 1.0 --seed 42 \
+	    --save_steps 2000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
+	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S0)/bleu_curve.jsonl'
 
 # ---------------------------------------------------------------- 评测
 
