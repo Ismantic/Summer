@@ -69,6 +69,9 @@ class Qwen3Config:
     max_position_embeddings: int = 32768
     tie_word_embeddings: bool = True
     torch_dtype: str = "bfloat16"
+    # 随机初始化的标准差。只有从零训练(init_weights)会读它;从 checkpoint
+    # 加载时权重来自文件,这个值不参与。与 Qwen3 官方 config 的同名字段一致。
+    initializer_range: float = 0.02
 
     @classmethod
     def from_json(cls, path) -> "Qwen3Config":
@@ -256,6 +259,60 @@ class Qwen3ForCausalLM(nn.Module):
     def gradient_checkpointing_enable(self, enable: bool = True) -> None:
         self.model.gradient_checkpointing = enable
 
+    @torch.no_grad()
+    def init_weights(self, seed: int | None = None) -> "Qwen3ForCausalLM":
+        """从零训练用的随机初始化。**没有这一步就只有 torch 的默认值。**
+
+        torch 的默认值对 transformer 是错的,而且错得不报错:
+
+            nn.Embedding  → N(0, 1)              std 比该有的 0.02 大 **50 倍**
+            nn.Linear     → U(±1/√fan_in)        均匀分布,且 fan_in 一变标准差就变
+
+        嵌入 std=1 意味着第一层的 RMSNorm 之前激活就是 O(1)*50,而 tie 之后
+        lm_head 也是同一份权重 —— 初始 logits 的量级直接决定第一步的 loss 和
+        梯度。这类错**照样能训**,只是慢、抖、有时候崩,回头查不出原因。
+
+        用的是 Llama / GPT-NeoX 那套:
+
+            所有权重       N(0, initializer_range)
+            残差出口       N(0, initializer_range / √(2L))  ← o_proj 和 down_proj
+            RMSNorm        全 1
+
+        残差出口缩放是为了让 28 层累加之后的方差不随深度线性增长。少了它
+        深层的激活会越叠越大,表现为训练早期的 loss spike。
+
+        tie 的模型里 `lm_head.weight` 就是 `embed_tokens.weight` 同一个张量,
+        `named_parameters()` 默认去重,所以只会被初始化一次 —— 不要改成
+        `remove_duplicate=False`,那会按两套 std 初始化同一块内存。
+        """
+        if seed is not None:
+            torch.manual_seed(seed)
+        std = self.config.initializer_range
+        resid_std = std / math.sqrt(2 * self.config.num_hidden_layers)
+        for name, p in self.named_parameters():
+            if name.endswith("o_proj.weight") or name.endswith("down_proj.weight"):
+                nn.init.normal_(p, mean=0.0, std=resid_std)
+            elif "norm" in name or "layernorm" in name:
+                nn.init.ones_(p)
+            else:
+                nn.init.normal_(p, mean=0.0, std=std)
+        return self
+
+    @classmethod
+    def from_config(cls, config_path, device="cpu", dtype=None,
+                    seed: int | None = None) -> "Qwen3ForCausalLM":
+        """只读 config.json,随机初始化权重 —— 从零预训练的起点。
+
+        与 `from_pretrained` 的区别就是不加载 checkpoint。刻意做成两个入口:
+        「加载失败于是静默随机初始化」是这个项目最怕的一类错。
+        """
+        cfg = Qwen3Config.from_json(Path(config_path) / "config.json")
+        model = cls(cfg).to(dtype or torch.float32)
+        model.init_weights(seed=seed)
+        if cfg.tie_word_embeddings:
+            model.lm_head.weight = model.model.embed_tokens.weight
+        return model.to(device)
+
     def save_pretrained(self, out_dir) -> None:
         """存成 HF 布局:`config.json` + `model.safetensors`。
 
@@ -269,12 +326,17 @@ class Qwen3ForCausalLM(nn.Module):
 
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
+        sd = self.state_dict_for_save()
         cfg = dataclasses.asdict(self.config)
         cfg["model_type"] = "qwen3"
         cfg["architectures"] = ["Qwen3ForCausalLM"]
+        # torch_dtype 写实际存下来的精度,不写 config 里那个。
+        # 从零预训练的参数是 float32,而 config 从模板继承来的可能还是
+        # bfloat16 —— 对不上时 vLLM 按 config 说的加载,权重被悄悄转一次,
+        # 不报错。以文件里的张量为准才是唯一不会骗人的口径。
+        cfg["torch_dtype"] = str(next(iter(sd.values())).dtype).removeprefix("torch.")
         (out_dir / "config.json").write_text(json.dumps(cfg, indent=2))
-        save_safetensors(self.state_dict_for_save(),
-                         out_dir / "model.safetensors", metadata={"format": "pt"})
+        save_safetensors(sd, out_dir / "model.safetensors", metadata={"format": "pt"})
 
     @classmethod
     def from_pretrained(cls, model_dir, device="cpu", dtype=None):

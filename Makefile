@@ -23,7 +23,7 @@ HERE := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 -include $(HERE)local.mk
 PY      ?= $(if $(VIRTUAL_ENV),$(VIRTUAL_ENV)/bin/python,python3)
 
-.PHONY: help status deps test test-equiv test-lora test-tok test-retok \
+.PHONY: help status deps test test-equiv test-lora test-tok test-retok test-init \
         test-ppl test-full clean-pyc
 
 help:
@@ -52,7 +52,9 @@ deps:
 #   equiv  自写 Qwen3 vs transformers,逐层对齐(结构判据)
 #   lora   自写 LoRA vs peft(数学判据)
 #   ppl    固定切片 next-token loss(端到端锚点)
-test: test-noleak test-equiv test-lora test-tok test-retok test-ppl
+#   init   从零初始化的统计量(**上面每一条都是「加载权重之后」比对,
+#          所以 2026-07-28 之前「根本没有初始化代码」这件事没有一条拦得住**)
+test: test-noleak test-equiv test-lora test-tok test-retok test-init test-ppl
 
 # 被跟踪的文件里不许有本机绝对路径(会把用户名推到 GitHub / HF 上,
 # 而且 git 历史里删不掉)。放在最前面 —— 它几毫秒,而且拦的是不可逆的事故。
@@ -72,6 +74,10 @@ test-equiv:
 
 test-lora:
 	$(PY) $(HERE)test/test_lora.py
+
+# 从零预训练的起点:嵌入/残差出口的 std、RMSNorm 全 1、初始 loss ≈ ln(V)
+test-init:
+	$(PY) $(HERE)test/test_init_scratch.py
 
 test-ppl:
 	$(PY) $(HERE)test/test_reproduce_sota.py --only ppl
