@@ -9,7 +9,7 @@ Hugging Face 的完整流程:词表手术、预编码、两阶段预训练、评
 模型与训练代码(`src/`)只依赖 torch —— Qwen3 的 forward、LoRA、Muon/Aurora、
 safetensors 读写都是独立实现，方便理解。
 
-产物是一个 **15.8 亿参数**的 Base 模型,规模上与 GPT-2 XL 相当。
+产物是一个 **1.5B 参数**的 Base 模型,规模上与 GPT-2 XL 相当。
 **不做指令微调,不是 Chat 模型** —— 下游是
 [`Interpreter`](https://github.com/Ismantic/Interpreter) 的自建中英翻译模型。
 
@@ -28,19 +28,19 @@ logits = model(torch.tensor([ids], device="cuda"))
 ```
 
 贪心续写的完整循环在发布包的 `example_load.py` 里。**这是 Base 模型,只会续写,
-不会对话** ——「█」之后是它接出来的,各截到第一个句号:
+不会对话** ——「->」之后是它接出来的,各截到第一个句号:
 
 ```
-机器翻译的基本任务是█将一种语言的文本翻译成另一种语言的文本。
-中文分词的目标是█将一个句子分割成若干个词语，这些词语是句子的基本单位。
-深度学习之所以有效,是因为█它能从大量的数据中学习到有用的特征,而这些特征是人类无法通过传统的方法发现的。
+机器翻译的基本任务是 -> 将一种语言的文本翻译成另一种语言的文本。
+中文分词的目标是 -> 将一个句子分割成若干个词语，这些词语是句子的基本单位。
+深度学习之所以有效,是因为 -> 它能从大量的数据中学习到有用的特征,而这些特征是人类无法通过传统的方法发现的。
 ```
 
 ## 模型
 
 | Hugging Face | 参数 | 词表 | 阶段 |
 |---|---|---|---|
-| [`Ismantic/Qwen3-1.7B-Base-ReTok`](https://huggingface.co/Ismantic/Qwen3-1.7B-Base-ReTok) | 1,577,147,392 | 81903 | Phase 2(LoRA tie-safe) |
+| [`Qwen3-1.7B-Base-ReTok`](https://huggingface.co/Ismantic/Qwen3-1.7B-Base-ReTok) | 1,577,147,392 | 81903 | Phase  |
 
 ```bash
 huggingface-cli download Ismantic/Qwen3-1.7B-Base-ReTok --local-dir ReTok
@@ -50,9 +50,9 @@ cd ReTok && python example_vllm.py     # vLLM 后端
 ```
 
 发布包自带推理代码和两个示例,除 PyTorch 和 PieceTokenizer 外无其他依赖 ——
-**不需要 transformers,也不需要 safetensors 库**。
+不需要 transformers,也不需要 safetensors 库。
 
-**分词器不是标准格式**,`AutoTokenizer` 走不通,所以 HF 在线推理和 `vllm serve`
+分词器不是标准格式,`AutoTokenizer` 走不通,所以 HF 在线推理和 `vllm serve`
 开箱用不了。vLLM 能加载权重(它用自己那份 Qwen3 实现),但要
 `skip_tokenizer_init=True` 并自己编码 id,见 `example_vllm.py`。
 
