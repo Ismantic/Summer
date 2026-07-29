@@ -1,5 +1,8 @@
 # Summer
 
+取名 Summer ，源于三年前 LLama-2 出来的时候不支持中文，做过类似的工作，
+三年后的今年夏天，旧事重提，再把这个项目做一次。
+
 中英双语 GPT-2 1.5B 级别底座模型，自建分词器，纯 PyTorch 实现。
 
 把 `Qwen3-1.7B-Base` 的原生词表(151643 BBPE)换成自己训的 Piece 词表
@@ -12,9 +15,6 @@ safetensors 读写都是独立实现，方便理解。
 产物是一个 **1.5B 参数**的 Base 模型,规模上与 GPT-2 XL 相当。
 **不做指令微调,不是 Chat 模型** —— 下游是
 [`Interpreter`](https://github.com/Ismantic/Interpreter) 的自建中英翻译模型。
-
-取名 Summer ，源于三年前 LLama-2 出来的时候不支持中文，做过类似的工作，
-三年后的今年夏天，旧事重提，再把这个项目做一次。
 
 ```python
 import torch
@@ -86,12 +86,11 @@ GSM8K 用 `exact_match,strict-match`;shots 依次 0 / 5 / 25 / 10 / 5 / 5。
 | 收益 | 词表 151643 → 81903,小 46%;嵌入参数省 142.9M |
 | 收益 | 分词器和底座完全自有,不依赖 Qwen 的词表 |
 
-其实更大的收益是:**独立自主,不是效率。**
+其实更大的收益是：**独立自主,不是效率。**
 
 ## 架构
 
-28L / 2048H / 6144I / GQA 16:8 / Head-Dim 128,与 Qwen3-1.7B-Base 完全一致 ——
-**这个项目只换词表,不改架构**。
+28L / 2048H / 6144I / GQA 16:8 / Head-Dim 128,与 Qwen3-1.7B-Base 完全一致.
 
 | | Qwen3-1.7B-Base | 本项目 |
 |---|---|---|
@@ -175,9 +174,6 @@ Python 3.11 + torch 2.11,单张 RTX 4090(24GB,bf16),没有多卡代码路径。
 ```bash
 uv pip install -r requirements.txt          # 训练 + 评测,一条就够
 ```
-
-**一个 venv 就够**,训练和评测都在里面。之所以是 3.11 而不是更新的版本:
-vllm 和 comet 上不了 3.14。解释器路径写在 gitignore 的 `local.mk` 里。
 
 C++ 依赖 [PieceTokenizer](https://github.com/Ismantic/PieceTokenizer) 由
 `make deps` 自动 clone 并编译(需要 `cmake` 和 C++17 编译器)。
