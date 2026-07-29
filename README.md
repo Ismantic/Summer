@@ -40,7 +40,7 @@ logits = model(torch.tensor([ids], device="cuda"))
 
 | Hugging Face | 参数 | 词表 | 阶段 |
 |---|---|---|---|
-| [`Qwen3-1.7B-Base-ReTok`](https://huggingface.co/Ismantic/Qwen3-1.7B-Base-ReTok) | 1,577,147,392 | 81903 | Phase  |
+| [`Qwen3-1.7B-Base-ReTok`](https://huggingface.co/Ismantic/Qwen3-1.7B-Base-ReTok) | 1,577,147,392 | 81903 | Phase 2|
 
 ```bash
 huggingface-cli download Ismantic/Qwen3-1.7B-Base-ReTok --local-dir ReTok
@@ -63,8 +63,8 @@ WMT22,1000 样本 5-shot,vLLM 后端:
 | | zh-en BLEU | zh-en COMET | en-zh BLEU | en-zh COMET |
 |---|---:|---:|---:|---:|
 | Qwen3-1.7B-Base | 22.34 | 0.8122 | 38.34 | 0.8597 |
-| Phase 1(冻结 transformer) | 20.26 | 0.7821 | 35.16 | 0.8276 |
-| **Phase 2(LoRA tie-safe)** | **20.46** | **0.7933** | **36.03** | **0.8444** |
+| Phase 1 | 20.26 | 0.7821 | 35.16 | 0.8276 |
+| **Phase 2** | **20.46** | **0.7933** | **36.03** | **0.8444** |
 
 | | LAMBADA | PIQA | ARC-C | HellaSwag | CEVAL | GSM8K |
 |---|---:|---:|---:|---:|---:|---:|
@@ -74,7 +74,7 @@ WMT22,1000 样本 5-shot,vLLM 后端:
 
 指标:LAMBADA / CEVAL 用 `acc`,PIQA / ARC-C / HellaSwag 用 `acc_norm`,
 GSM8K 用 `exact_match,strict-match`;shots 依次 0 / 5 / 25 / 10 / 5 / 5。
-**gsm8k 两个指标差得不小**(Phase 1 的 flexible-extract 是 0.0417),所以
+**GSM8k 两个指标差得不小**(Phase 1 的 flexible-extract 是 0.0417),所以
 必须写明用的哪个 —— 口径以 [`prepare/sweep.py`](prepare/sweep.py) 的
 `PREFER` 为准。
 
