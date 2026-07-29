@@ -2,6 +2,7 @@
 
 取名 Summer ，源于三年前 LLama-2 出来的时候不支持中文，做过类似的工作，
 三年后的今年夏天，旧事重提，再把这个项目做一次。
+目标是以最低成本，用最佳实践方法，取得SOTA效果。
 
 中英双语 GPT-2 1.5B 级别底座模型，自建分词器，纯 PyTorch 实现。
 
@@ -149,8 +150,8 @@ make -C prepare status     # 每一步产物在不在
 
 | | 时间 | 从哪开始 | 教程 |
 |---|---|---|---|
-| 评测已发布模型 | 分钟级 | HF 上的 ReTok 模型 | [`docs/eval/pipeline.md`](docs/eval/pipeline.md) |
-| 两阶段继续预训练 | 约 30 小时 + 预编码 | Qwen3-1.7B-Base | [`docs/PRETRAIN.md`](docs/PRETRAIN.md) |
+| 评测效果 | 分钟级 | HF 上的 ReTok 模型 | [`docs/eval/pipeline.md`](docs/eval/pipeline.md) |
+| 两阶段训练 | 约 30 小时 + 预编码 | Qwen3-1.7B-Base | [`docs/PRETRAIN.md`](docs/PRETRAIN.md) |
 
 建议先跑评测 —— 分钟级就有反馈,而且能验证整条链路(词表、模型、数据、指标)
 是通的。`make test` 是回归防线,几分钟。
@@ -169,7 +170,7 @@ make -C prepare status     # 每一步产物在不在
 
 ## 环境
 
-Python 3.11 + torch 2.11,单张 RTX 4090(24GB,bf16),没有多卡代码路径。
+Python 3.11 + torch 2.11,默认用单张 RTX 4090(24GB,Bf16)。
 
 ```bash
 uv pip install -r requirements.txt          # 训练 + 评测,一条就够
@@ -177,7 +178,7 @@ uv pip install -r requirements.txt          # 训练 + 评测,一条就够
 
 C++ 依赖 [PieceTokenizer](https://github.com/Ismantic/PieceTokenizer) 由
 `make deps` 自动 clone 并编译(需要 `cmake` 和 C++17 编译器)。
-**81903 词表和中文分词词典都在它仓库的 `save/` 下,本仓库不留副本。**
+81903 词表和中文分词词典都在它仓库的 `save/` 下,本仓库不留副本。
 
 ## 许可
 
