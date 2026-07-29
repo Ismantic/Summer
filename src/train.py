@@ -486,13 +486,19 @@ def train(args):
         torch.cuda.empty_cache()
 
     import signal
-    def _sigint_handler(sig, frame):
+    def _stop_handler(sig, frame):
         nonlocal interrupted
-        if interrupted:  # second Ctrl+C = force quit
+        if interrupted:  # 第二次直接退
             raise KeyboardInterrupt
         interrupted = True
-        print(f"\nCtrl+C received at step {step}, saving checkpoint...", flush=True)
-    signal.signal(signal.SIGINT, _sigint_handler)
+        name = {signal.SIGINT: "SIGINT(Ctrl+C)", signal.SIGTERM: "SIGTERM"}.get(sig, str(sig))
+        print(f"\n收到 {name},在 step {step} 存 checkpoint 后退出 ...", flush=True)
+    # **SIGTERM 也要接。** 只接 SIGINT 的话,被 kill、被会话清理、被系统关机
+    # 带走时都是硬杀 —— 退回上一个 save_steps 的 checkpoint,中间那些步全丢。
+    # 2026-07-29 真踩了一次:step 5000 被 SIGTERM,只能从 checkpoint-4000 续,
+    # 白跑 1000 步(3.5 小时)。
+    signal.signal(signal.SIGINT, _stop_handler)
+    signal.signal(signal.SIGTERM, _stop_handler)
 
     while step < args.max_steps and not interrupted:
         dataloader = make_loader(epoch, consumed)
