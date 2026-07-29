@@ -1,17 +1,20 @@
 # Summer
 
-中英双语底座模型,自建分词器,纯 PyTorch 实现。
+中英双语 GPT-2 1.5B 级别底座模型，自建分词器，纯 PyTorch 实现。
 
-把 `Qwen/Qwen3-1.7B-Base` 的原生词表(151643 BBPE)换成自己训的 piece 词表
-(81903),再用两阶段继续预训练把能力恢复回来 —— 这类工作叫 **ReTok**
+把 `Qwen3-1.7B-Base` 的原生词表(151643 BBPE)换成自己训的 Piece 词表
+(81903)，再用两阶段继续预训练把能力恢复回来 —— 这类工作叫 **ReTok**
 ([arXiv:2410.04335](https://arxiv.org/abs/2410.04335))。包含从下载语料到发布上
 Hugging Face 的完整流程:词表手术、预编码、两阶段预训练、评测、导出发布。
 模型与训练代码(`src/`)只依赖 torch —— Qwen3 的 forward、LoRA、Muon/Aurora、
-safetensors 读写都是自己实现的。
+safetensors 读写都是独立实现，方便理解。
 
-产物是一个 **15.8 亿参数**的 base 模型,规模上与 GPT-2 XL 相当。
-**不做指令微调,不是 chat 模型** —— 下游是
+产物是一个 **15.8 亿参数**的 Base 模型,规模上与 GPT-2 XL 相当。
+**不做指令微调,不是 Chat 模型** —— 下游是
 [`Interpreter`](https://github.com/Ismantic/Interpreter) 的自建中英翻译模型。
+
+取名 Summer ，源于三年前 LLama-2 出来的时候不支持中文，做过类似的工作，
+三年后的今年夏天，旧事重提，再把这个项目做一次。
 
 ```python
 import torch
@@ -24,7 +27,7 @@ ids = tok.encode("机器翻译的基本任务是")
 logits = model(torch.tensor([ids], device="cuda"))
 ```
 
-贪心续写的完整循环在发布包的 `example_load.py` 里。**这是 base 模型,只会续写,
+贪心续写的完整循环在发布包的 `example_load.py` 里。**这是 Base 模型,只会续写,
 不会对话** ——「█」之后是它接出来的,各截到第一个句号:
 
 ```
