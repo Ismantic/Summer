@@ -1,5 +1,7 @@
 # Summer
 
+English | [中文](README.md)
+
 The name Summer comes from a similar project I worked on three years ago, when
 Llama 2 did not support Chinese. This summer, I am revisiting that work. The goal
 is to achieve state-of-the-art results at the lowest possible cost using current
