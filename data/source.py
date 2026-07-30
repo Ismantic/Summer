@@ -208,6 +208,55 @@ PRETRAIN_SOURCES = {
 }
 
 
+# ---------------------------------------------------------------- 平行语料
+#
+# 只给 Summer-0.5B 的退火段用,ReTok 的两个 mix 不碰这些。
+#
+# ## 为什么需要
+#
+# 2026-07-30,S0 跑到 2.5B token 时看实际输出:中文已经流利,但**完全没有
+# in-context learning** —— 5-shot 的例子对它没有任何约束力,让它把中文译成
+# 英文,它输出的是一段无关的中文。这是质的缺口不是量的缺口,再喂 9B 单语
+# token 也不会变。参照:Qwen3-0.6B 是靠 36T token 才有这个能力的。
+#
+# 平行文本当普通文档喂进预训练**不是指令微调**,模型仍然是 base
+# (TowerBase / ALMA 就是这个路子)。
+#
+# ## 域要对得上
+#
+# WMT22 的测试集里有对话和电商域(实测样本是外卖骑手、餐厅这类),而 WMT19
+# 的训练集偏新闻 + 联合国文件 + CWMT,都很正式。所以除了 WMT19 还要一个
+# 口语域的源,否则学到的是「翻译公文」。
+#
+# ## 污染
+#
+# WMT19 训练集早于 WMT21/22 测试集(那两个是当年新译的),news_commentary
+# 同理。**刻意不收 haoranxu/ALMA-Human-Parallel** —— 那是 ../Interpreter 的
+# SFT 数据(WMT17-20 测试集),混进底座会让下游的评测失去意义。
+
+PARALLEL_SOURCES = {
+    "WMT19_ZHEN": Source(
+        name="WMT19_ZHEN", kind="hf", repo_id="wmt/wmt19",
+        subdir="wmt19", part_glob="zh-en/train-*.parquet", n_parts=None,
+        allow_patterns=["zh-en/train-*.parquet"], lang="bi",
+        fmt="parquet_pair", text_field="translation",
+        note="WMT19 zh-en 训练集,13 parquet / 3.61GB / 约 2600 万句对"
+             "(news-commentary + 联合国 + CWMT + ParaCrawl)。schema 是 "
+             "`translation: struct<en, zh>` —— 不是单列文本,所以 fmt 用 "
+             "parquet_pair。偏正式域。",
+    ),
+    "OPUS100_ZHEN": Source(
+        name="OPUS100_ZHEN", kind="hf", repo_id="Helsinki-NLP/opus-100",
+        subdir="opus-100", part_glob="en-zh/train-*.parquet", n_parts=None,
+        allow_patterns=["en-zh/train-*.parquet"], lang="bi",
+        fmt="parquet_pair", text_field="translation",
+        note="OPUS-100 en-zh,约 100 万句对。混合域(含字幕、口语),补 WMT19 "
+             "缺的对话域 —— WMT22 测试集里有相当一部分是对话和电商。"
+             "**只取 train 分片**,test/validation 不下(那是它自己的评测集)。",
+    ),
+}
+
+
 # ---------------------------------------------------------------- 评测资产
 #
 # WMT22/23 测试集不在这里 —— `prepare/_translate_common.py:load_pair()` 走
@@ -252,7 +301,7 @@ EVAL_SOURCES = {
 }
 
 
-ALL_SOURCES = {**PRETRAIN_SOURCES, **EVAL_SOURCES}
+ALL_SOURCES = {**PRETRAIN_SOURCES, **PARALLEL_SOURCES, **EVAL_SOURCES}
 
 
 def get(name: str) -> Source:

@@ -12,6 +12,8 @@
 #   make init-scratch    随机初始化的起点(Qwen3-0.6B-Base 架构 + 81903 词表)
 #   make encode-scratch  预编码 12B token / 中英各半 / 分 shard(3 小时)
 #   make s0              长跑约 6 天,每 2000 步自动测一次 WMT22 5-shot BLEU
+#   make encode-anneal-mt  编带平行语料的退火集(CPU,可与训练并行)
+#   make s1 STEP=40000     换退火集跑最后 4514 步(学习率同时衰到 10%)
 #
 #   24GB 卡上要降 batch:make p1 BATCH=4 ACCUM=64 / make p2 BATCH=4 ACCUM=32
 #
@@ -241,6 +243,56 @@ s0-resume:
 	    --max_grad_norm 1.0 --seed 42 \
 	    --save_steps 2000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
 	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S0)/bleu_curve.jsonl'
+
+# ---------------------------------------------------------------- S1 退火
+#
+# 单语跑到 S0_STEPS - 退火窗口(默认 45149 - 4514 = 40635)之后,换成带中英
+# 平行语料的数据集跑最后那 4514 步,学习率同时从 0.02 衰到 0.002。
+#
+#   make encode-anneal-mt          编 1.2B token 的退火集(CPU,可与训练并行)
+#   make s1 STEP=40000             从 S0 的 checkpoint 接着退火
+#
+# ## 为什么退火要换数据
+#
+# 2026-07-30 在 S0 的 step 8000(2.5B token)看实际输出:中文已经流利,但
+# 5-shot 的例子对模型没有任何约束力 —— 让它把中文译成英文,它输出一段无关的
+# 中文。**这是质的缺口,不是量的缺口**,剩下 9B 单语 token 不会改变它。
+# 平行文本当普通文档喂进来是唯一的杠杆(TowerBase / ALMA 的路子),模型仍是 base。
+#
+# ## --reset_data_position 不能省
+#
+# train_state 里的 consumed 是**旧数据集的索引**。拿 1024 万去切一个 460 万
+# chunk 的新数据集,切出来是空的 —— DataLoader 一条都不吐,for 循环直接结束、
+# epoch 自增,然后才从头开始。不报错,只是白转一圈还把 epoch 记歪。
+
+ANNEAL_MT ?= $(OUT)/anneal_mt_1024.pt
+S1        ?= $(OUT)/summer05b_s1
+ANNEAL_MT_SHARDS = $(shell ls $(OUT)/anneal_mt_1024.s*.pt 2>/dev/null | paste -sd,)
+
+.PHONY: encode-anneal-mt s1
+
+encode-anneal-mt:
+	$(PY) $(HERE)encode_corpus.py --mix anneal_mt \
+	    --tokenizer_model $(PIECE) --cn_dict $(CN_DICT) \
+	    --output $(ANNEAL_MT) --total_tokens 1200000000 --seq_length 1024 \
+	    --shard_output --num_workers 6 --max_tokens_per_shard 150000000
+
+s1:
+	$(PY) $(ROOT)/src/train.py \
+	    --model_path $(INIT_S) --resume_from $(S0)/checkpoint-$(STEP) \
+	    --reset_data_position \
+	    --train_data "$(ANNEAL_MT_SHARDS)" --mode clm \
+	    --output_dir $(S1) \
+	    --max_seq_length 1024 --batch_size $(S0_BATCH) \
+	    --gradient_accumulation_steps $(S0_ACCUM) \
+	    --gradient_checkpointing --compile \
+	    --param_dtype float32 --ce_chunk 4096 \
+	    --max_steps $(S0_STEPS) --warmup_steps 2000 \
+	    --lr_schedule wsd --lr_decay_steps $$(( $(S0_STEPS) / 10 )) \
+	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
+	    --max_grad_norm 1.0 --seed 42 \
+	    --save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 2000 \
+	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S1)/bleu_curve.jsonl'
 
 # ---------------------------------------------------------------- 评测
 

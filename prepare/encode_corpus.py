@@ -8,6 +8,8 @@
   --mix anneal  → ReTok P2  6 源,EN 0.60  / CN 0.40, 200M token
   --mix scratch → Summer-0.5B 从零预训练 10 源,EN 0.50 / CN 0.50,12B token
                   (配合 --shard_output —— 12B 拼成一份要 48GB 内存)
+  --mix anneal_mt → Summer-0.5B 退火段:最高质量单语 0.70 + 中英平行语料 0.30,
+                  1.2B token(= WSD 退火窗口 4514 步 × 262,144)
 """
 import argparse
 import glob
@@ -16,6 +18,7 @@ import json
 import math
 import multiprocessing as mp
 import os
+import random
 import sys
 import tempfile
 import time
@@ -91,6 +94,32 @@ SCRATCH_WEIGHTS = {
 }
 
 
+# Summer-0.5B 的退火配方:最高质量的单语 + 30% 中英平行语料。
+#
+# 起因是 2026-07-30 在 S0 的 step 8000(2.5B token)看实际输出:中文已经流利,
+# 但 5-shot 的例子对模型没有任何约束力 —— 让它把中文译成英文,它输出一段无关
+# 的中文。**这是质的缺口,不是量的缺口**,剩下 9B 单语 token 不会改变它。
+#
+# 平行语料占 30%(TowerBase 那类配方的量级)。单语那 70% 只留质量最高的六个源
+# —— 退火段的作用是把能力「定型」,不是继续铺广度。
+#
+# 中 / 英 / 双语 = 0.35 / 0.35 / 0.30。平行数据本身两个方向各半,所以实际的
+# 语言曝光大致还是对半。
+ANNEAL_MT_WEIGHTS = {
+    # ---------------- EN 0.35 ----------------
+    "FineWebEdu":     0.14,
+    "Cosmopedia":     0.14,
+    "Wikipedia_EN":   0.07,
+    # ---------------- CN 0.35 ----------------
+    "CN_FineWeb_Edu": 0.15,
+    "CCI3-HQ":        0.12,
+    "Wikipedia_CN":   0.08,
+    # ---------------- 平行 0.30 ----------------
+    "WMT19_ZHEN":     0.26,
+    "OPUS100_ZHEN":   0.04,   # 池子只有约 100 万句对,再高就喂不满
+}
+
+
 # P2 anneal: v12 anneal mix 原样 (60/40 HQ-concentrated)
 ANNEAL_WEIGHTS = {
     "FineWebEdu":     0.20,
@@ -104,7 +133,93 @@ ANNEAL_WEIGHTS = {
 }
 
 
-def iter_text(fmt, files, field):
+# ---------------------------------------------------------------- 平行语料
+#
+# ## 为什么不用评测那个模板
+#
+# `prepare/translate.py` 的 few-shot 提示是:
+#
+#     Translate Chinese to English.\n\n
+#     Chinese: {源}\nEnglish: {译}\n\n   ×5
+#     Chinese: {待译}\nEnglish:
+#
+# 照这个字面写法喂进预训练,5-shot BLEU 就**不再是泛化的度量,而是
+# in-distribution 测试** —— 数字会好看,但意义变了。这跟「为了让数字好看去改
+# 评测代码」是同一类问题,只是绕了一圈。
+#
+# 所以下面这些模板一个都不等于它:标签用中文/小写/Source-Target,表头换措辞
+# 或者干脆没有。模型要学到的是「连续的双语对照」这件事,不是那一句英文指令。
+#
+# ## 一篇文档装多对
+#
+# few-shot 能力来自「看见前面几对之后接着照做」。一篇只放一对的话,模型学到
+# 的是句子级的翻译映射,学不到「照着上文的格式继续」。所以每篇塞十几对、
+# 同一个模板贯穿,让 1024 的窗口里能看到完整的模式重复。
+
+PAIR_HEADERS = {
+    "zh-en": ["以下是中英对照。\n\n", "把下面的中文译成英文。\n\n",
+              "Chinese–English bitext:\n\n", ""],
+    "en-zh": ["以下是英中对照。\n\n", "把下面的英文译成中文。\n\n",
+              "English–Chinese bitext:\n\n", ""],
+}
+PAIR_LABELS = {
+    "zh-en": [("中文", "英文"), ("原文", "译文"), ("zh", "en"),
+              ("Source (Chinese)", "Target (English)")],
+    "en-zh": [("英文", "中文"), ("原文", "译文"), ("en", "zh"),
+              ("Source (English)", "Target (Chinese)")],
+}
+PAIR_SEPS = [": ", "：", "\t"]
+
+
+def _format_pair_block(pairs, rng):
+    """把若干 (zh, en) 句对格式化成一篇双语文档。"""
+    direction = rng.choice(["zh-en", "en-zh"])
+    header = rng.choice(PAIR_HEADERS[direction])
+    s_lab, t_lab = rng.choice(PAIR_LABELS[direction])
+    sep = rng.choice(PAIR_SEPS)
+    out = [header]
+    for zh, en in pairs:
+        s, t = (zh, en) if direction == "zh-en" else (en, zh)
+        if sep == "\t":                       # 经典 bitext:一行一对,制表符分隔
+            out.append(f"{s}\t{t}\n")
+        else:
+            out.append(f"{s_lab}{sep}{s}\n{t_lab}{sep}{t}\n\n")
+    return "".join(out)
+
+
+def iter_pairs(files, seed=0, pairs_per_doc=14):
+    """读 `translation: struct<en, zh>` 的 parquet,吐格式化好的双语文档。"""
+    import pyarrow.parquet as pq
+    rng = random.Random(seed)
+    buf = []
+    for path in files:
+        pf = pq.ParquetFile(path)
+        for batch in pf.iter_batches(batch_size=4000, columns=["translation"]):
+            for d in batch.column(0).to_pylist():
+                if not d:
+                    continue
+                zh = (d.get("zh") or "").strip()
+                en = (d.get("en") or "").strip()
+                # 空的、以及长得不像一句话的都丢掉 —— 平行语料里的超长条目
+                # 多半是对齐错位,一条脏数据会带着十几对一起进同一篇文档。
+                if not zh or not en or len(zh) > 1000 or len(en) > 1000:
+                    continue
+                buf.append((zh, en))
+                if len(buf) >= pairs_per_doc:
+                    yield _format_pair_block(buf, rng)
+                    buf = []
+    if buf:
+        yield _format_pair_block(buf, rng)
+
+
+def iter_text(fmt, files, field, seed=0):
+    if fmt == "parquet_pair":
+        yield from iter_pairs(files, seed=seed)
+        return
+    yield from _iter_text_plain(fmt, files, field)
+
+
+def _iter_text_plain(fmt, files, field):
     for path in files:
         if fmt == "parquet":
             import pyarrow.parquet as pq
@@ -147,7 +262,8 @@ def worker_process_shard(args):
     n_docs, last_log = 0, 0
     t0 = time.time()
     label = f"{src_name}#{shard_idx}"
-    for text in iter_text(fmt, files, field):
+    # 每个 shard 用不同的种子,模板抽样才不会 52 份全一样;换机器重跑仍相同。
+    for text in iter_text(fmt, files, field, seed=1000 + shard_idx):
         if len(text) > max_line_chars:
             text = text[:max_line_chars]
         buf.extend(tok.encode_as_ids(text))
@@ -211,7 +327,7 @@ def build_shards(weights, total_tokens, n_workers, tmpdir, seq_len, max_line_cha
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--mix", choices=["main", "anneal", "scratch"], required=True)
+    p.add_argument("--mix", choices=["main", "anneal", "scratch", "anneal_mt"], required=True)
     p.add_argument("--tmpdir", default="",
                    help="worker 中间 .npy 的落地目录。默认与 --output 同目录 ——"
                         "中间文件总量等于产物大小,放 /tmp 会撑爆 tmpfs。")
@@ -239,7 +355,7 @@ def main():
     args = p.parse_args()
 
     weights = {"main": MAIN_WEIGHTS, "anneal": ANNEAL_WEIGHTS,
-               "scratch": SCRATCH_WEIGHTS}[args.mix]
+               "scratch": SCRATCH_WEIGHTS, "anneal_mt": ANNEAL_MT_WEIGHTS}[args.mix]
     print(f"Mix: {args.mix} | sources: {len(weights)} | total weight {sum(weights.values()):.3f}")
     print(f"Budget: {args.total_tokens:,} tokens "
           f"({args.total_tokens // args.seq_length:,} chunks of {args.seq_length})")
@@ -336,7 +452,9 @@ def main():
     # 不影响任何结论;而 CN_FineWeb_Edu 的池子比配额小,会把中英比例整体拉偏
     # ——那才是会悄悄改变模型的东西。所以逐源只报告(上表),报错看比例。
     lang_dev = {}
-    for lang in ("en", "zh"):
+    # 语言集合从注册表来,不写死 —— 退火配方里有 lang="bi" 的平行语料,
+    # 硬编码 ("en","zh") 的话它整个不进对账,占了 30% 也看不见。
+    for lang in sorted({_source.get(n).lang for n in weights}):
         names = [n for n in weights if _source.get(n).lang == lang]
         plan = sum(weights[n] for n in names)
         real = sum(got.get(n, 0) for n in names) / max(1, actual_total)

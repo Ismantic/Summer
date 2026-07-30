@@ -402,6 +402,15 @@ def train(args):
         _move_optimizer_state(device)
         step = resume_state["step"]
         epoch, consumed = resume_state["epoch"], resume_state["consumed"]
+        if args.reset_data_position:
+            # 换数据集续训(比如退火段换成带平行语料的那份)必须清掉位置。
+            # train_state 里的 consumed 是**旧数据集的索引**:拿 1024 万去切
+            # 一个 460 万 chunk 的新数据集,切出来是空的 —— DataLoader 一条都
+            # 不吐,for 循环直接结束、epoch 自增,然后才从头开始。不报错,
+            # 只是白转一圈还把 epoch 记歪了。
+            log(f"[resume] --reset_data_position:丢掉旧数据位置"
+                f"(epoch {epoch} / 已吃 {consumed:,} chunk),从新数据集头部开始")
+            epoch, consumed = 0, 0
         # scheduler 是 step 的纯函数,不用存 —— 快进到该在的位置就行。
         # 这样即使 max_steps 变了(WSD 提前收尾),退火窗口自动落在新末尾。
         for _ in range(step):
@@ -657,6 +666,10 @@ if __name__ == "__main__":
                              "退火末段 lr 降到 3e-5 时,单步更新只占权重的 0.15%%,"
                              "低于 bf16 的分辨率,会被直接舍掉。继续预训练(ReTok "
                              "两阶段)保持 bfloat16,与 v18 一致。")
+    parser.add_argument("--reset_data_position", action="store_true",
+                        help="续训时不沿用 train_state 里的数据位置。**换数据集续训"
+                             "必须加这个** —— consumed 是旧数据集的索引,拿去切新的"
+                             "会切空。优化器状态和 step 照常恢复。")
     parser.add_argument("--keep_ckpt", type=int, default=0,
                         help="只保留最近 N 份 checkpoint(0 = 全留,旧行为)。"
                              "从零预训练每份 4.5GB、要存 20 多次,不清理会撑爆磁盘。")
