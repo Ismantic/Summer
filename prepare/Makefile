@@ -197,6 +197,16 @@ S0       ?= $(OUT)/summer05b_s0
 S0_STEPS ?= 45149
 S0_BATCH ?= 16
 S0_ACCUM ?= 16
+# **DataLoader 用 0 个 worker。**
+#
+# 2026-08-01 第二次挂:worker 被外部 SIGTERM 杀掉,主进程随后被 torch 的
+# `_error_if_any_worker_fails()` 硬崩 —— 走不到 train.py 的优雅退出,
+# 那一轮的进度全丢(1050 步 / 3.7 小时)。
+#
+# 数据是 mmap 的,取一条只是一次页缺失 + int32→int64:实测 20,800 tok/s 下
+# 每秒才 25 次随机 4KB 读,主进程自己做完全够。多开 worker 换不来吞吐,
+# 只多出一条「worker 死了就硬崩」的路径。
+S0_WORKERS ?= 0
 
 # 训练时把所有 shard 逗号拼起来喂进去(train.py 会 mmap 它们)
 SCRATCH_SHARDS = $(shell ls $(OUT)/scratch_1024.s*.pt 2>/dev/null | paste -sd,)
@@ -224,7 +234,8 @@ s0:
 	    --lr_schedule wsd --lr_decay_steps $$(( $(S0_STEPS) / 10 )) \
 	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
 	    --max_grad_norm 1.0 --seed 42 \
-	    --save_steps 2000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
+	    --num_workers $(S0_WORKERS) \
+	--save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
 	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S0)/bleu_curve.jsonl'
 
 # 断了之后接着跑:make s0-resume STEP=12000
@@ -241,7 +252,8 @@ s0-resume:
 	    --lr_schedule wsd --lr_decay_steps $$(( $(S0_STEPS) / 10 )) \
 	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
 	    --max_grad_norm 1.0 --seed 42 \
-	    --save_steps 2000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
+	    --num_workers $(S0_WORKERS) \
+	--save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
 	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S0)/bleu_curve.jsonl'
 
 # ---------------------------------------------------------------- S1 退火
