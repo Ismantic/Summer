@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -318,12 +319,50 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text.rstrip() + "\n", encoding="utf-8")
 
 
+def _reexport_weights(src: Path, dst: Path, cfg_path: Path, dtype: str) -> None:
+    """按 dtype 重写权重,并把 config.json 的 torch_dtype 改成一致。
+
+    两者不一致会让下游按 config 的 dtype 去读一份别的 dtype 的张量 —— 不报错,
+    只是悄悄降精度或占双倍显存。所以一起改,不分开。
+    """
+    import json
+
+    import torch
+
+    sys.path.insert(0, str(ROOT))
+    from src.checkpoint import load_safetensors, save_safetensors
+
+    want = getattr(torch, dtype)
+    sd = load_safetensors(str(src))
+    n_cast = 0
+    for k, v in sd.items():
+        if v.is_floating_point() and v.dtype != want:
+            sd[k] = v.to(want)
+            n_cast += 1
+    save_safetensors(sd, str(dst))
+
+    cfg = json.loads(cfg_path.read_text())
+    cfg["torch_dtype"] = dtype
+    cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
+    print(f"权重转为 {dtype}({n_cast} 个张量),config.json 的 torch_dtype 已同步")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument("--copy", action="store_true", help="Copy files instead of hardlinking them.")
+    # **发布 bf16,fp32 主权重留在 output/。**
+    #
+    # 训练用 fp32 主权重(bf16 的相对精度 2^-8=0.39%,退火末尾一步的更新只有
+    # 权重量级的 0.15%,fp32 是必需的 —— 见 docs/WHY.md 第四点五)。但那是
+    # **训练**的需要:发布包是给推理和下游微调用的,下游照样 autocast 到 bf16,
+    # fp32 只是把体积翻倍。已发布的 ReTok 也是 bf16。
+    #
+    # 不覆盖源 checkpoint —— output/ 里的 fp32 是真相来源,转换只发生在导出。
+    parser.add_argument("--dtype", choices=["keep", "bfloat16", "float16", "float32"],
+                        default="keep", help="导出权重的 dtype(默认原样)")
     args = parser.parse_args()
 
     source = args.source.resolve()
@@ -338,7 +377,13 @@ def main() -> None:
 
     out.mkdir(parents=True, exist_ok=True)
     for src_names, dst in FILES_TO_COPY:
+        if dst == "model.safetensors" and args.dtype != "keep":
+            continue          # 下面单独转
         link_or_copy(_pick(source, src_names), out / dst, args.copy)
+
+    if args.dtype != "keep":
+        _reexport_weights(_pick(source, "model.safetensors"),
+                          out / "model.safetensors", out / "config.json", args.dtype)
 
     # **把模型代码一起带上** —— 发布包只依赖 torch + piece_tokenizer,
     # 用户不需要 transformers 也不需要 safetensors 库。BERTc 的发布包一直如此。

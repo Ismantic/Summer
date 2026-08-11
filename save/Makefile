@@ -25,8 +25,12 @@ OUT  ?= $(HERE)releases/Qwen3-1.7B-Base-ReTok
 help:
 	@awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' $(HERE)Makefile
 
+# DTYPE=bfloat16 发布 bf16(体积减半,下游照样 autocast 到 bf16)。
+# fp32 主权重留在 output/,那是真相来源 —— 转换只发生在导出。
+DTYPE ?= keep
+
 export:
-	$(PY) $(HERE)export.py --source $(CKPT) --out $(OUT)
+	$(PY) $(HERE)export.py --source $(CKPT) --out $(OUT) --dtype $(DTYPE)
 
 releases:
 	@$(PY) $(HERE)releases.py
