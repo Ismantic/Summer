@@ -31,6 +31,7 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -69,6 +70,10 @@ def main():
            "--num_fewshot", str(a.num_fewshot),
            "--max_samples", str(a.max_samples),
            "--gpu_mem_util", str(a.gpu_mem_util),
+           # 全部 200 条,不是默认的 5 条。BLEU 是个标量,回头想问「为什么
+           # zh-en 这么低」的时候,只有译文本身能回答 —— 而重跑一遍要重新
+           # 起 vLLM,还得那个 checkpoint 没被 --keep_ckpt 删掉。
+           "--save_all_samples",
            "--output_path", tmp_json]
 
     t0 = time.time()
@@ -89,6 +94,14 @@ def main():
     for d, res in out["results"].items():
         rec[f"bleu_{d}"] = round(res["bleu"], 2)
     _append(a.curve, rec)
+
+    # **样本要挪出 checkpoint 目录。** trans_eval.json 原本只写在 ckpt 里,而
+    # --keep_ckpt 3 会把旧 ckpt 整个删掉,样本跟着没。S0 就这么丢了 26 个 step
+    # 的译文 —— BLEU 数字还在 bleu_curve.jsonl,但译文找不回来了。
+    # evals/ 一个 step 一个文件,几百 KB,不参与任何清理。
+    keep_dir = os.path.join(os.path.dirname(os.path.abspath(a.curve)), "evals")
+    os.makedirs(keep_dir, exist_ok=True)
+    shutil.copy2(tmp_json, os.path.join(keep_dir, f"trans_eval_{a.step}.json"))
 
     line = "  ".join(f"{k} {v}" for k, v in rec.items() if k.startswith("bleu_"))
     print(f"[eval_hook] step {a.step} | {line} | {rec['elapsed_s']:.0f}s", flush=True)
