@@ -256,6 +256,61 @@ s0-resume:
 	--save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
 	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S0)/bleu_curve.jsonl'
 
+# 装成 systemd 用户服务:开机自动从最新 checkpoint 续上。
+#
+# 跑六天的东西不能指望「有人记得去拉起来」。2026-08-02 那次硬重启,人不在,
+# GPU 空转了 3.5 小时。装完还要开 linger,否则没登录时用户服务不启动。
+S0_UNIT := $(HOME)/.config/systemd/user/summer-s0.service
+
+s0-service:
+	@mkdir -p $(dir $(S0_UNIT))
+	@printf '%s\n' \
+	  '[Unit]' \
+	  'Description=Summer-0.5B S0 pretraining (auto-resume)' \
+	  'StartLimitIntervalSec=3600' \
+	  'StartLimitBurst=5' \
+	  '' \
+	  '[Service]' \
+	  'Type=simple' \
+	  'WorkingDirectory=$(abspath $(ROOT))' \
+	  'Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True' \
+	  'ExecStart=/usr/bin/env bash $(HERE)s0_autoresume.sh' \
+	  'Restart=on-failure' \
+	  'RestartSec=120' \
+	  '' \
+	  '[Install]' \
+	  'WantedBy=default.target' \
+	  > $(S0_UNIT)
+	systemctl --user daemon-reload
+	systemctl --user enable summer-s0.service
+	@echo
+	@echo "已装。开机自启还需要一次:  loginctl enable-linger \$$USER"
+	@echo "启动:  systemctl --user start summer-s0"
+
+# 机器状态采样,给下一次硬重启留现场(见 health_sample.sh 的注释)
+HEALTH_UNIT := $(HOME)/.config/systemd/user/summer-health.service
+
+health-service:
+	@mkdir -p $(dir $(HEALTH_UNIT))
+	@printf '%s\n' \
+	  '[Unit]' \
+	  'Description=Summer machine health sampler' \
+	  '' \
+	  '[Service]' \
+	  'Type=simple' \
+	  'WorkingDirectory=$(abspath $(ROOT))' \
+	  'ExecStart=/usr/bin/env bash $(HERE)health_sample.sh' \
+	  'Restart=always' \
+	  'RestartSec=30' \
+	  'Nice=10' \
+	  '' \
+	  '[Install]' \
+	  'WantedBy=default.target' \
+	  > $(HEALTH_UNIT)
+	systemctl --user daemon-reload
+	systemctl --user enable --now summer-health.service
+	@echo "已装并启动。看:  tail -5 output/health.csv"
+
 # ---------------------------------------------------------------- S1 退火
 #
 # 单语跑到 S0_STEPS - 退火窗口(默认 45149 - 4514 = 40635)之后,换成带中英
@@ -281,7 +336,7 @@ ANNEAL_MT ?= $(OUT)/anneal_mt_1024.pt
 S1        ?= $(OUT)/summer05b_s1
 ANNEAL_MT_SHARDS = $(shell ls $(OUT)/anneal_mt_1024.s*.pt 2>/dev/null | paste -sd,)
 
-.PHONY: encode-anneal-mt s1
+.PHONY: encode-anneal-mt s1 s1-resume s1-service
 
 encode-anneal-mt:
 	$(PY) $(HERE)encode_corpus.py --mix anneal_mt \
@@ -303,8 +358,56 @@ s1:
 	    --lr_schedule wsd --lr_decay_steps $$(( $(S0_STEPS) / 10 )) \
 	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
 	    --max_grad_norm 1.0 --seed 42 \
+	    --num_workers $(S0_WORKERS) \
 	    --save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 2000 \
 	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S1)/bleu_curve.jsonl'
+
+# 断了之后接着跑 —— 起点在 S1 自己的目录里,不是 S0 的
+s1-resume:
+	$(PY) $(ROOT)/src/train.py \
+	    --model_path $(INIT_S) --resume_from $(S1)/checkpoint-$(STEP) \
+	    --train_data "$(ANNEAL_MT_SHARDS)" --mode clm \
+	    --output_dir $(S1) \
+	    --max_seq_length 1024 --batch_size $(S0_BATCH) \
+	    --gradient_accumulation_steps $(S0_ACCUM) \
+	    --gradient_checkpointing --compile \
+	    --param_dtype float32 --ce_chunk 4096 \
+	    --max_steps $(S0_STEPS) --warmup_steps 2000 \
+	    --lr_schedule wsd --lr_decay_steps $$(( $(S0_STEPS) / 10 )) \
+	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
+	    --max_grad_norm 1.0 --seed 42 \
+	    --num_workers $(S0_WORKERS) \
+	    --save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 2000 \
+	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S1)/bleu_curve.jsonl'
+
+# 同 s0-service,但只跑退火那 4514 步。装之前记得先停掉 summer-s0,
+# 否则重启后两个服务会一起起来抢 GPU。
+S1_UNIT := $(HOME)/.config/systemd/user/summer-s1.service
+S1_FROM ?= 40000
+
+s1-service:
+	@mkdir -p $(dir $(S1_UNIT))
+	@printf '%s\n' \
+	  '[Unit]' \
+	  'Description=Summer-0.5B S1 anneal (auto-resume)' \
+	  'StartLimitIntervalSec=3600' \
+	  'StartLimitBurst=5' \
+	  '' \
+	  '[Service]' \
+	  'Type=simple' \
+	  'WorkingDirectory=$(abspath $(ROOT))' \
+	  'Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True' \
+	  'Environment=S1_FROM=$(S1_FROM)' \
+	  'ExecStart=/usr/bin/env bash $(HERE)s1_autoresume.sh' \
+	  'Restart=on-failure' \
+	  'RestartSec=120' \
+	  '' \
+	  '[Install]' \
+	  'WantedBy=default.target' \
+	  > $(S1_UNIT)
+	systemctl --user daemon-reload
+	systemctl --user enable summer-s1.service
+	@echo "已装。启动:  systemctl --user start summer-s1"
 
 # ---------------------------------------------------------------- 评测
 
