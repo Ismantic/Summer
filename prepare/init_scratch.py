@@ -120,6 +120,20 @@ def main(args):
     with open(os.path.join(args.output_path, "token_mapping.json"), "w") as f:
         json.dump(mapping, f, indent=2)
 
+    # **generation_config.json 是必需的。** retok.py 那条线是靠 transformers 的
+    # model.generation_config 顺带写出来的(retok.py:219),这条线自己造模型,
+    # 没有那个对象 —— 漏了之后一路无感,直到 save/export.py 拒绝导出
+    # (它把这个文件列为必需)。而真正的风险在漏了却没人拦的时候:生成时
+    # eos/pad 走 HF 默认值,和这套 81903 词表对不上。
+    gen_cfg = {
+        "bos_token_id": mapping["bos_id"],
+        "eos_token_id": mapping["eos_id"],
+        "pad_token_id": mapping["pad_id"],
+        "max_new_tokens": 2048,
+    }
+    with open(os.path.join(args.output_path, "generation_config.json"), "w") as f:
+        json.dump(gen_cfg, f, indent=2)
+
     print(f"\n完成:{args.output_path}")
 
 

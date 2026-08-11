@@ -48,7 +48,10 @@ def _copy_tokenizer_artifacts(src_dir, dst_dir):
     # piece.model / dict.txt 是改造前的名字,v18 的 ckpt 和已发布模型在用。
     artifacts = ["Summer-Tokenizer.pt", "Summer-Tokenizer.dict.txt",
                  "piece.model", "dict.txt", "token_mapping.json",
-                 "tokenizer_config.json", "special_tokens_map.json"]
+                 "tokenizer_config.json", "special_tokens_map.json",
+                 # 漏了它 save/export.py 会拒绝导出;更糟的是没被拦住的时候,
+                 # 生成时 eos/pad 走 HF 默认值,和这套 81903 词表对不上。
+                 "generation_config.json"]
     for name in artifacts:
         src = os.path.join(src_dir, name)
         if os.path.exists(src):
