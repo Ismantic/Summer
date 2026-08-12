@@ -63,7 +63,7 @@ from prepare.tokenizer import (PieceTokenizerWrapper,           # noqa: E402
 # **配比受制于中文侧的供给。** 实测各源本地可出的 token:
 #
 #   SmolTalk(en)      90.2M(本地 1/4 分片,全量约 360M)
-#   COIG_CQIA(zh)      6.5M  ← 44,693 条,平均只有 145 token
+#   COIG_CQIA(zh)      6.5M  ← **这个数是错的,见下**
 #   MMLU_AuxTrain      26.6M
 #   GSM8K_Train         1.3M
 #
@@ -73,6 +73,23 @@ from prepare.tokenizer import (PieceTokenizerWrapper,           # noqa: E402
 #
 # 中英不是严格 50:50:多选题(MMLU)和数学(GSM8K)本身是英文的,它们进来是为了
 # 教**题型**,不是教英文。纯对话那部分 SmolTalk : COIG_CQIA = 1 : 1。
+#
+# ## 那个 6.5M 是幸存者偏差,真实是约 50M
+#
+# 估算时我用「encode_turns 返回的 token 总数 ÷ 条数」当平均长度,但这个函数
+# **超长的会返回空**,于是分母算了全部、分子只算了留下来的短样本 —— 越丢越显得
+# 平均短,估出 145 token/条。
+#
+# 实测 COIG-CQIA 的真实分布:**中位数 1126 token**,p90 2093,p99 2459。
+# seq_len 1024 下只有 50% 能整条装下,另一半按「单轮超长」被整条丢掉 ——
+# 而切段策略对它无效:它是单轮长回答(考试题解析、知乎长答),切段只在多轮之间
+# 切,单轮切不了。
+#
+# 所以中文侧的实际供给是约 50M 而不是 6.5M,上面这个配比的前提不成立。
+# **当前这份 midtrain 数据仍然可用**(34.8M、配比精确、掩码正确,中文那 6.65M
+# 是真实完整样本,只是偏短的那一半),先拿它跑通链路;要不要重编等验证完再定。
+# 重编的话有两条路:seq_len 提到 2048(丢弃率降到个位数),或允许在助手回复内部
+# 截断(会让模型学到「说到一半就停」,不推荐)。
 MIDTRAIN_WEIGHTS = {
     "SmolTalk": 0.19,          # en 对话  ≈ 6.5M,与中文侧对齐
     "COIG_CQIA": 0.19,         # zh 对话  ≈ 6.5M,全量
