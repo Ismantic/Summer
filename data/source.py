@@ -263,6 +263,63 @@ PARALLEL_SOURCES = {
 # sacrebleu 自带的下载器(`sacrebleu.get_source_file`),不需要本仓库管。
 # mono 六个 benchmark 由 `data/prefetch_eval_datasets.py` 从 HF 拉。
 
+# ---------------------------------------------------------------- 对话 / 指令
+#
+# **给 Summer-0.5B 的 midtrain + SFT 用,与 ReTok 那条线无关。**
+#
+# 为什么需要这一层:预训练语料全是纯文本,`<user>` / `<assistant>` / `<system>`
+# 三个 token 从没作为输入出现过。实测 S1 权重里它们和 `<pad>` 的余弦相似度
+# 全是 **+1.0000** —— 在模型眼里是同一个向量(普通 token 之间平均 0.285)。
+# 直接上 SFT 等于让模型在一个 epoch 里同时学任务和学这三个分隔符。
+# nanochat 的 midtrain 就是补这一段:先用对话格式的数据把模板喂熟。
+#
+# 中英双语:底座是中英 50:50 训的,只喂英文对话会浪费掉一半能力,C-Eval 也没法看。
+CHAT_SOURCES = {
+    "SmolTalk": Source(
+        name="SmolTalk", kind="hf", repo_id="HuggingFaceTB/smol-smoltalk",
+        subdir="smol-smoltalk", part_glob="data/train-*.parquet", n_parts=None,
+        allow_patterns=["data/train-*.parquet"], lang="en",
+        fmt="parquet_chat", text_field="messages",
+        note="nanochat 的 midtrain/SFT 主料。**smol- 那版是给小模型用的**"
+             "(原 SmolTalk 面向 1B+,难度偏高)。schema 是 "
+             "`messages: list<struct<role, content>>`,所以 fmt 用 parquet_chat。",
+    ),
+    "COIG_CQIA": Source(
+        name="COIG_CQIA", kind="hf", repo_id="m-a-p/COIG-CQIA",
+        subdir="COIG-CQIA", part_glob="COIG-CQIA-full.jsonl", n_parts=None,
+        allow_patterns=["COIG-CQIA-full.jsonl"], lang="zh",
+        fmt="jsonl_instruct", text_field="instruction",
+        note="**中文侧的对话主料。** 字段是 instruction/input/output,带 "
+             "human_verified 标记,来源是知乎/百科/考试题等中文原生内容。"
+             "\n"
+             "先登记的是 BAAI/Infinity-Instruct,**实测中文占比不够**:"
+             "7M 子集 9.8%、3M 21.6%、Gen 33.4%(抽样 2000-3000 条,按汉字"
+             ">5% 计)—— 它是混合集不是中文集,撑不起 50:50 的底座。"
+             "COIG-CQIA 抽 3000 条是 100% 中文。这条是 probe 抓出来的。",
+    ),
+    "MMLU_AuxTrain": Source(
+        name="MMLU_AuxTrain", kind="hf", repo_id="cais/mmlu",
+        subdir="mmlu", part_glob="auxiliary_train/*.parquet", n_parts=None,
+        allow_patterns=["auxiliary_train/*.parquet"], lang="en",
+        fmt="parquet_mc", text_field="train",
+        note="多选题格式。nanochat 在 midtrain 里掺它,目的是让模型见过"
+             "「四个选项选一个」这种题型 —— 否则 MMLU/ARC 评测时连格式都不会,"
+             "分数低到无法反映真实能力。**auxiliary_train 是训练split**,"
+             "与 MMLU 的 test/dev 不重叠,不构成泄漏。"
+             "**列名就叫 `train`**,question/choices/answer 嵌在它里面 ——"
+             "不是平铺的三列,probe 抓到过这个。",
+    ),
+    "GSM8K_Train": Source(
+        name="GSM8K_Train", kind="hf", repo_id="openai/gsm8k",
+        subdir="gsm8k", part_glob="main/train-*.parquet", n_parts=None,
+        allow_patterns=["main/train-*.parquet"], lang="en",
+        fmt="parquet_qa", text_field="question",
+        note="小学数学应用题 7473 条,带分步解答。nanochat 用它做 midtrain 的"
+             "数学/工具使用那一份,以及最后 RL 阶段的题库。**只取 train**,"
+             "test 是 gsm8k 评测集(make bench 里那项)。",
+    ),
+}
+
 EVAL_SOURCES = {
     "qwen_base": Source(
         name="qwen_base", kind="hf-snapshot", repo_id="Qwen/Qwen3-1.7B-Base",
@@ -301,7 +358,8 @@ EVAL_SOURCES = {
 }
 
 
-ALL_SOURCES = {**PRETRAIN_SOURCES, **PARALLEL_SOURCES, **EVAL_SOURCES}
+ALL_SOURCES = {**PRETRAIN_SOURCES, **PARALLEL_SOURCES,
+               **CHAT_SOURCES, **EVAL_SOURCES}
 
 
 def get(name: str) -> Source:

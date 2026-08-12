@@ -212,11 +212,112 @@ def iter_pairs(files, seed=0, pairs_per_doc=14):
         yield _format_pair_block(buf, rng)
 
 
+# 对话模板。**与 prepare/chat.py 的 render 必须一致** —— 这里产出的是纯文本
+# (给 midtrain 走 clm 路径),chat.py 产出的是带 <user>/<assistant> 特殊 token 的
+# id 序列(给 SFT 走掩码路径)。两者的可见文字必须相同,否则 midtrain 教熟的
+# 格式和 SFT 用的格式对不上,这一段就白做了。
+CHAT_TURN = {"user": "用户", "assistant": "助手", "system": "系统",
+             "human": "用户", "gpt": "助手"}
+
+
+def _render_chat(turns):
+    """[(role, content)] → 纯文本。role 用中文标签,双语语料共用一套。"""
+    out = []
+    for role, content in turns:
+        if not content:
+            continue
+        out.append(f"{CHAT_TURN.get(role, role)}:{content}")
+    return "\n\n".join(out) if out else None
+
+
 def iter_text(fmt, files, field, seed=0):
     if fmt == "parquet_pair":
         yield from iter_pairs(files, seed=seed)
         return
+    if fmt == "parquet_qa":
+        yield from _iter_qa(files)
+        return
+    if fmt == "jsonl_instruct":
+        yield from _iter_instruct(files)
+        return
+    if fmt in ("parquet_chat", "parquet_chat_sharegpt", "parquet_mc"):
+        yield from _iter_structured(fmt, files, field)
+        return
     yield from _iter_text_plain(fmt, files, field)
+
+
+def _iter_structured(fmt, files, field):
+    """对话 / 多选 / 问答 → 纯文本。给 midtrain 用,走和预训练同一条 clm 路径。
+
+    midtrain 的目的是让模型见过这些**格式**,不是精调答案质量(那是 SFT 的事),
+    所以整段算 loss、不做掩码 —— nanochat 的 midtrain 也是这么做的。
+    """
+    import pyarrow.parquet as pq
+
+    for path in files:
+        pf = pq.ParquetFile(path)
+        for batch in pf.iter_batches(batch_size=2000, columns=[field]):
+            for row in batch.column(0).to_pylist():
+                if row is None:
+                    continue
+                if fmt == "parquet_chat":                 # [{role, content}]
+                    t = _render_chat([(m.get("role", ""), m.get("content", ""))
+                                      for m in row])
+                elif fmt == "parquet_chat_sharegpt":      # [{from, value}]
+                    t = _render_chat([(m.get("from", ""), m.get("value", ""))
+                                      for m in row])
+                elif fmt == "parquet_mc":                 # {question, choices, answer}
+                    ch = row.get("choices") or []
+                    if not ch or row.get("answer") is None:
+                        continue
+                    opts = "\n".join(f"{chr(65 + i)}. {c}" for i, c in enumerate(ch))
+                    ans = chr(65 + int(row["answer"]))
+                    t = _render_chat([("user", f"{row.get('question', '')}\n{opts}"),
+                                      ("assistant", ans)])
+                else:                                     # parquet_qa: 见下
+                    t = None
+                if t:
+                    yield t
+
+
+def _iter_instruct(files):
+    """instruction / input / output 三段式(COIG-CQIA 等)。
+
+    input 可空 —— 空的时候不要留个孤零零的换行,那会让模型学到「有时候
+    用户那一段末尾多一个空行」这种伪规律。
+    """
+    for path in files:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except Exception:                              # noqa: BLE001
+                    continue
+                q = (r.get("instruction") or "").strip()
+                extra = (r.get("input") or "").strip()
+                a = (r.get("output") or "").strip()
+                if not q or not a:
+                    continue
+                if extra:
+                    q = f"{q}\n{extra}"
+                yield _render_chat([("user", q), ("assistant", a)])
+
+
+def _iter_qa(files, q_field="question", a_field="answer"):
+    """GSM8K 这类两列平铺的问答。**要两列都读**,所以不能走单 field 的通道。"""
+    import pyarrow.parquet as pq
+
+    for path in files:
+        pf = pq.ParquetFile(path)
+        for batch in pf.iter_batches(batch_size=2000, columns=[q_field, a_field]):
+            qs = batch.column(0).to_pylist()
+            as_ = batch.column(1).to_pylist()
+            for q, a in zip(qs, as_):
+                if q and a:
+                    yield _render_chat([("user", q), ("assistant", a)])
 
 
 def _iter_text_plain(fmt, files, field):
