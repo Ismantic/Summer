@@ -109,10 +109,16 @@ from prepare.tokenizer import (PieceTokenizerWrapper,           # noqa: E402
 # 而且瓶颈不在这里:对 Qwen3-0.6B-Base 的 MMLU 差 0.24,是预训练 13B token 的
 # 问题,不是 SFT 数据量的问题。为了把中文从 9M 提到 26M 去冒位置编码训不透的
 # 风险,收益和风险不匹配。**这是已知限制,不是待修的 bug。**
+# **中文多选是补上去的,原因是实测出来的洞。** 之前 midtrain 里的多选题全是
+# 英文(MMLU_AuxTrain),中文那半(COIG_CQIA)是知乎长答和考试解析,一条选择题
+# 都没有 —— 于是「看到选项就答字母」只在英文语境里学会了。实测格式跟随
+# (不加约束、全词表 argmax、首选是不是候选字母):英文 0.96-0.99,中文 0.3899。
+# 中文那个数没修之前,C-Eval 的分数分不出「不会做题」和「没听懂要答字母」。
 MIDTRAIN_WEIGHTS = {
     "SmolTalk": 0.19,          # en 对话  ≈ 6.5M,与中文侧对齐
     "COIG_CQIA": 0.19,         # zh 对话  ≈ 6.5M,全量
-    "MMLU_AuxTrain": 0.58,     # 多选题型 ≈ 20M
+    "MMLU_AuxTrain": 0.48,     # en 多选题型 ≈ 17M
+    "C3_Train": 0.10,          # zh 多选题型 ≈ 3.4M,全量 11869 条
     "GSM8K_Train": 0.04,       # 数学/分步推理 ≈ 1.3M,全量
 }
 
@@ -184,13 +190,29 @@ def iter_turns(name: str):
 
     for path in files:
         pf = pq.ParquetFile(path)
-        cols = [field] if fmt != "parquet_qa" else ["question", "answer"]
+        # **列的选法按 fmt 分三种。** MMLU 那种是把 question/choices/answer 嵌在
+        # 一个叫 `train` 的结构体列里,只读一列就够;GSM8K 和 C3 是平铺的多列。
+        cols = {"parquet_qa": ["question", "answer"],
+                "parquet_mc_zh": ["context", "question", "choice", "answer"],
+                }.get(fmt, [field])
         for batch in pf.iter_batches(batch_size=2000, columns=cols):
             if fmt == "parquet_qa":                   # GSM8K
                 for q, a in zip(batch.column(0).to_pylist(),
                                 batch.column(1).to_pylist()):
                     if q and a:
                         yield [("user", q), ("assistant", a)]
+                continue
+            if fmt == "parquet_mc_zh":                # CLUE 的 C3,中文多选
+                for ctx, q, ch, ans in zip(*(batch.column(i).to_pylist()
+                                             for i in range(4))):
+                    # **answer 是答案原文,不是下标** —— 要反查。查不到就丢,
+                    # 不猜:猜错会教模型把正确答案和错的字母绑在一起。
+                    if not ch or ans is None or ans not in ch:
+                        continue
+                    ctx = "\n".join(ctx) if isinstance(ctx, (list, tuple)) else (ctx or "")
+                    opts = "\n".join(f"{chr(65 + i)}. {c}" for i, c in enumerate(ch))
+                    yield [("user", f"{ctx}\n{q}\n{opts}" if ctx else f"{q}\n{opts}"),
+                           ("assistant", chr(65 + list(ch).index(ans)))]
                 continue
             for row in batch.column(0).to_pylist():
                 if row is None:

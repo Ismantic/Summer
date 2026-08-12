@@ -318,6 +318,19 @@ CHAT_SOURCES = {
              "数学/工具使用那一份,以及最后 RL 阶段的题库。**只取 train**,"
              "test 是 gsm8k 评测集(make bench 里那项)。",
     ),
+    "C3_Train": Source(
+        name="C3_Train", kind="hf", repo_id="clue/clue",
+        subdir="c3", part_glob="c3/train-*.parquet", n_parts=None,
+        allow_patterns=["c3/train-*.parquet"], lang="zh",
+        fmt="parquet_mc_zh", text_field="question",
+        note="**中文多选**,11869 条,CLUE 的 C3 子集(多选阅读理解)。"
+             "补的是一个实测出来的洞:midtrain 里的多选题(MMLU_AuxTrain)全是"
+             "英文,中文那半(COIG_CQIA)一条选择题都没有,于是「看到选项答字母」"
+             "只在英文语境里学会了 —— 实测格式跟随英文 0.96-0.99、中文 0.3899。"
+             "**取的是正经 train split,和 C-Eval 评测集无重叠**,不是拿 benchmark "
+             "的测试集来训。字段和 MMLU 不一样:context 是句子列表、choice 长度"
+             "2-4 不定、**answer 是答案原文不是下标**,要反查 index。",
+    ),
 }
 
 EVAL_SOURCES = {
