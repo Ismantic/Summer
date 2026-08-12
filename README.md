@@ -166,6 +166,7 @@ make -C prepare status     # 每一步产物在不在
 | | |
 |---|---|
 | [`docs/WHY.md`](docs/WHY.md) | 各处设计选择的理由,以及改错了不报错的地方 |
+| [`docs/POSTTRAIN.md`](docs/POSTTRAIN.md) | 后训练(midtrain/SFT)每一版的改动与效果,对齐 nanochat 的清单 |
 | [`docs/PRETRAIN.md`](docs/PRETRAIN.md) | 从零重做一遍的全流程,含每步耗时和磁盘占用 |
 | [`docs/eval/pipeline.md`](docs/eval/pipeline.md) | 评测栈:三个入口,数字怎么读 |
 | [`data/source.py`](data/source.py) | 数据源注册表 + 逐个溯源的依据 |
