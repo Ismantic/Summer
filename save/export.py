@@ -15,7 +15,7 @@ DEFAULT_SOURCE = ROOT / "output" / "phase2_ckpt_v18_tie"
 DEFAULT_OUT = ROOT / "save" / "releases" / "Qwen3-1.7B-Base-ReTok"
 DEFAULT_REPO_ID = "Ismantic/Qwen3-1.7B-Base-ReTok"
 
-MODEL_CARD = """---
+RETOK_CARD = """---
 license: apache-2.0
 base_model: Qwen/Qwen3-1.7B-Base
 library_name: transformers
@@ -296,6 +296,133 @@ FILES_TO_COPY = [
 ]
 
 
+# **从零预训练那条线的模型卡。** 与 RETOK_CARD 是两个不同的模型,不能共用一份 ——
+# 之前 export 只做 `MODEL_CARD.replace(旧名, 新名)`,换了标题却照抄正文,于是
+# Summer-0.5B 的发布包里写着 `base_model: Qwen/Qwen3-1.7B-Base` 和
+# `tags: retok / tokenizer-replacement`。**我们是随机初始化,没有 base_model,
+# 也不是换词表。** 这种错不报错,但传上去就是一份错误的模型描述。
+SCRATCH_CARD = """---
+license: apache-2.0
+library_name: transformers
+pipeline_tag: text-generation
+tags:
+- qwen3
+- from-scratch
+- pretraining
+- bilingual
+- piece-tokenizer
+language:
+- en
+- zh
+---
+
+# {name}
+
+{name} is a **from-scratch** bilingual (Chinese/English) base model:
+524,336,128 parameters, trained from random initialization on
+**{tokens} tokens** with a self-trained 81,903-piece tokenizer.
+
+It is *not* a fine-tune or a tokenizer-swap of any existing model. The
+architecture follows `Qwen/Qwen3-0.6B-Base` (28 layers / hidden 1024 /
+GQA 16:8 / head_dim 128 / tied embeddings / RoPE theta 1e6), but every weight
+starts from `N(0, 0.02)`.
+
+{stage_desc}
+
+## What to expect
+
+**This is a 13B-token model.** For scale: `Qwen3-0.6B-Base` saw 36T tokens —
+about 2,700x more. Treat the numbers below as what that budget buys, not as a
+competitive result.
+
+{results}
+
+## Tokenizer
+
+The tokenizer is a compiled C++ extension, **not** loadable by
+`AutoTokenizer`. The release ships `tokenizer.py` and `example_load.py`:
+
+```bash
+pip install git+https://github.com/Ismantic/PieceTokenizer
+python example_load.py
+```
+
+The model code (`model.py`, `checkpoint.py`) is bundled too — the package
+depends only on `torch` plus the tokenizer extension, not on `transformers`.
+
+## Training
+
+Full pipeline, data mixes and every design decision (including the mistakes)
+are documented in <https://github.com/Ismantic/Summer>. Notably
+`docs/WHY.md` records why fp32 master weights are mandatory, why the learning
+rate schedule is WSD rather than cosine, and what the vocabulary swap cost.
+
+## License
+
+Apache-2.0. Training corpora are public datasets (FineWeb-Edu, Cosmopedia,
+CCI3-HQ, SkyPile, WMT19, OPUS-100 and others; see `data/source.py` upstream).
+Please observe their respective licenses.
+"""
+
+S0_DESC = """## Stage
+
+**S0** — monolingual only. 12B tokens, Chinese/English 50:50, 45,149 steps.
+No parallel or instruction data at any point."""
+
+S1_DESC = """## Stage
+
+**S1** — S0 plus a parallel-data anneal. Branched from S0 at step 40,000 and
+ran the decay window (40,000 -> 45,149) on 1.2B tokens containing **30%
+Chinese-English parallel text**.
+
+S0 and S1 are a controlled pair: same starting checkpoint, same
+hyperparameters, same learning-rate schedule. **Only the data differs.**"""
+
+S0_RESULTS = """| WMT22 5-shot | BLEU | COMET |
+|---|---|---|
+| zh->en | 0.54 | 0.4638 |
+| en->zh | 3.97 | 0.5872 |
+
+**Few-shot translation is essentially zero, and that is the finding.** The
+model ignores the in-context examples entirely — on zh->en it does not even
+switch output language. Language modelling was learned; in-context learning
+was not. 12B monolingual tokens is not enough for ICL to emerge at 0.5B.
+
+Its value is as (a) the control for S1, and (b) a starting point for
+mid-training / SFT."""
+
+S1_RESULTS = """| WMT22 5-shot | BLEU | COMET |
+|---|---|---|
+| zh->en | 8.99 | 0.6855 |
+| en->zh | 27.29 | 0.7743 |
+
+Against S0 (0.54 / 3.97) this is more than an order of magnitude, and the
+jump is **qualitative**: S0 ignores the examples and gets the output language
+wrong, S1 actually translates. 1.2B tokens of anneal data — 30% of it
+parallel — is what made in-context learning appear."""
+
+CARDS = {
+    "Summer-0.5B-S0": dict(card=SCRATCH_CARD, tokens="12B",
+                           stage_desc=S0_DESC, results=S0_RESULTS),
+    "Summer-0.5B-S1": dict(card=SCRATCH_CARD, tokens="13B",
+                           stage_desc=S1_DESC, results=S1_RESULTS),
+}
+
+
+def render_card(repo_id: str) -> str:
+    """按发布身份选模型卡。不认识的名字**报错,不要默默套 ReTok 那份**。"""
+    name = repo_id.split("/")[-1]
+    if name in CARDS:
+        c = CARDS[name]
+        return c["card"].format(name=name, tokens=c["tokens"],
+                                stage_desc=c["stage_desc"], results=c["results"])
+    if "ReTok" in name:
+        return RETOK_CARD.replace(DEFAULT_REPO_ID, repo_id)
+    raise SystemExit(
+        f"没有 {name} 的模型卡。在 save/export.py 的 CARDS 里加一份 ——"
+        f"套用别的模型那份不会报错,但传上去就是错的描述。")
+
+
 def _pick(source, names):
     for n in (names if isinstance(names, tuple) else (names,)):
         if (source / n).exists():
@@ -397,7 +524,7 @@ def main() -> None:
     # **不拷 lineage 报告。** 它记的是本机的复现路径(哪个目录、哪个脚本),
     # 里面全是本机绝对路径 —— 那是本机信息,不该跟着模型发出去。复现记录留在
     # 仓库的 docs/reports/v18_tie_lineage.md,模型卡给出仓库链接就够了。
-    write_text(out / "README.md", MODEL_CARD.replace(DEFAULT_REPO_ID, args.repo_id))
+    write_text(out / "README.md", render_card(args.repo_id))
     write_text(out / ".gitattributes", GITATTRIBUTES)
     write_text(out / "requirements.txt", REQUIREMENTS)
 

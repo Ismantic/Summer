@@ -29,8 +29,12 @@ help:
 # fp32 主权重留在 output/,那是真相来源 —— 转换只发生在导出。
 DTYPE ?= keep
 
+# REPO_ID 决定用哪份模型卡(save/export.py 的 CARDS)。不传就用默认那个 ——
+# 而默认是 ReTok,套到别的模型上会写出一份错误的描述且不报错。
+REPO_ID ?=
+
 export:
-	$(PY) $(HERE)export.py --source $(CKPT) --out $(OUT) --dtype $(DTYPE)
+	$(PY) $(HERE)export.py --source $(CKPT) --out $(OUT) --dtype $(DTYPE) 	    $(if $(REPO_ID),--repo-id $(REPO_ID),)
 
 releases:
 	@$(PY) $(HERE)releases.py

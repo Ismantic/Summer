@@ -39,6 +39,44 @@ class Release:
 
 RELEASES = [
     Release(
+        repo_id="Ismantic/Summer-0.5B-S0",
+        local="output/summer05b_s0",
+        stage="S0(从零预训练,纯单语)",
+        note="随机初始化从零训:Qwen3-0.6B-Base 架构 + 自训 81903 piece 词表 = "
+             "524,336,128 参数,单语 12B token(中英 50:50)跑 45,149 步。"
+             "\n"
+             "**5-shot 翻译基本为零**(WMT22 zh-en BLEU 0.54 / COMET 0.4638,"
+             "en-zh 3.97 / 0.5872):模型完全无视 few-shot 示例,zh→en 时连输出"
+             "语言都不对。语言模型学到了,in-context learning 没有 —— 这不是"
+             "缺陷,是 13B token 这个量级的实话。它的用途是当 S1 的对照,"
+             "以及当后续 midtrain/SFT 的起点。",
+        sha256={
+            "model.safetensors":
+                "d7c081f09d27487588dd88c11e5ef8734a11ca02ae9d7427fbee36b5c3d95a63",
+            "Summer-Tokenizer.pt":
+                "b9b81cefcaa5d47cd3aa6e653dda0a80f90b7863b3cfff790dfc07c662dda50f",
+        },
+    ),
+    Release(
+        repo_id="Ismantic/Summer-0.5B-S1",
+        local="output/summer05b_s1",
+        stage="S1(在 S0 上用中英平行语料退火)",
+        note="从 S0 的 step 40,000 分叉,用含 30% 中英平行语料的 1.2B token 跑完"
+             "退火段(40,000 → 45,149)。与 S0 是受控对照:同起点、同超参、"
+             "同学习率时间表,**只差数据**。"
+             "\n"
+             "WMT22 5-shot zh-en BLEU 8.99 / COMET 0.6855,en-zh 27.29 / 0.7743"
+             "—— 相对 S0 跳了一个量级(0.54 / 3.97),而且是定性跨越:S0 无视"
+             "示例、输出语言都不对,S1 开始真的在翻译。这 1.2B token 里的"
+             "平行语料是 in-context learning 出现的直接原因。",
+        sha256={
+            "model.safetensors":
+                "d465bf052d71d07a236507b1145fdcaa87fa1d4c1bfa6d11f644de35e7dd3a79",
+            "Summer-Tokenizer.pt":
+                "b9b81cefcaa5d47cd3aa6e653dda0a80f90b7863b3cfff790dfc07c662dda50f",
+        },
+    ),
+    Release(
         repo_id="Ismantic/Qwen3-1.7B-Base-ReTok",
         local="output/phase2_ckpt_v18_tie",
         stage="Phase 2 (LoRA tie-safe)",
