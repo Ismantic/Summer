@@ -60,11 +60,24 @@ from prepare.tokenizer import (PieceTokenizerWrapper,           # noqa: E402
 # —— 否则 MMLU / ARC / C-Eval 评测时连输出格式都不会,分数低到无法反映真实能力。
 #
 # 中英对半:底座是中英 50:50 训出来的,只喂英文会浪费掉一半能力。
+# **配比受制于中文侧的供给。** 实测各源本地可出的 token:
+#
+#   SmolTalk(en)      90.2M(本地 1/4 分片,全量约 360M)
+#   COIG_CQIA(zh)      6.5M  ← 44,693 条,平均只有 145 token
+#   MMLU_AuxTrain      26.6M
+#   GSM8K_Train         1.3M
+#
+# 中文对话料比英文少一个量级。硬凑 50:50 就得把中文重复十几遍,那会在中文上
+# 过拟合 —— 而这种偏斜在 loss 曲线上看不出来。所以这一版**按中文侧的实际供给
+# 定总量**(约 35M),而不是先定总量再配比。
+#
+# 中英不是严格 50:50:多选题(MMLU)和数学(GSM8K)本身是英文的,它们进来是为了
+# 教**题型**,不是教英文。纯对话那部分 SmolTalk : COIG_CQIA = 1 : 1。
 MIDTRAIN_WEIGHTS = {
-    "SmolTalk": 0.34,          # en 对话
-    "COIG_CQIA": 0.34,         # zh 对话
-    "MMLU_AuxTrain": 0.22,     # 多选题型
-    "GSM8K_Train": 0.10,       # 数学/分步推理
+    "SmolTalk": 0.19,          # en 对话  ≈ 6.5M,与中文侧对齐
+    "COIG_CQIA": 0.19,         # zh 对话  ≈ 6.5M,全量
+    "MMLU_AuxTrain": 0.58,     # 多选题型 ≈ 20M
+    "GSM8K_Train": 0.04,       # 数学/分步推理 ≈ 1.3M,全量
 }
 
 # SFT 只用对话,不掺题型 —— 题型该在 midtrain 学完。中英仍对半。

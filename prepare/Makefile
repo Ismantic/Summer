@@ -416,6 +416,39 @@ bench:
 	    --tasks "lambada_openai:0,piqa:5,arc_challenge:25,hellaswag:10,ceval-valid:5,gsm8k:5" \
 	    --output_dir $(ROOT)/eval_results/full/$(TAG)_vllm
 
+# ---------------------------------------------------------------- nanochat 口径
+#
+# **与 nanochat 的 report card 对齐**,这样 Summer-0.5B 有个同量级的外部靶子:
+# 它的 d20 是 560M 参数 / 约 11B token,我们是 524M / 13B —— 同一档。
+#
+#   nanochat d20  base: CORE 0.2219
+#                 SFT 后: ARC-E 0.3876  ARC-C 0.2807  MMLU 0.3151
+#                        GSM8K 0.0455  HumanEval 0.0854  ChatCORE 0.0884
+#
+# few-shot 数按 nanochat:多选题 0-shot(它的 base 评测走 CORE 的 continuation
+# 口径),GSM8K 用 8-shot(它 SFT 后是 0-shot,但我们的底座没经过指令微调,
+# 0-shot 下连格式都不会,给 8 个示例才测得出能力而不是格式)。
+#
+# **上面那个 bench 的 shot 数不动** —— eval_results/full/ 里 v18 的历史数字是
+# 按那套跑的,改了就没法和自己的过去比。两套并存,各自内部可比。
+#
+# 中文那两项(ceval / cmmlu)是 nanochat 没有的:它是纯英文模型,我们是中英
+# 50:50。只报英文会把一半能力藏起来。
+# piqa 和 cmmlu **不在这套里**:它们在 HF 上是老式的 loading script 数据集,
+# 新版 datasets 已经不支持("Dataset scripts are no longer supported")。为了凑
+# 这两个指标去降级 datasets 不值得 —— 上面 `make bench` 那套里还有 piqa,
+# 那是历史缓存能读到的。
+BENCH_NC_TASKS ?= arc_easy:0,arc_challenge:0,mmlu:0,hellaswag:0,winogrande:0,boolq:0,openbookqa:0,gsm8k:8,humaneval:0,ceval-valid:0
+
+bench-nanochat:
+	$(PY) $(HERE)benchmark.py --model_path $(CKPT) \
+	    --tasks "$(BENCH_NC_TASKS)" \
+	    --output_dir $(ROOT)/eval_results/nanochat/$(TAG)
+
+# 把 eval_results/nanochat/ 下的结果排成一张对照表(含 nanochat d20 的数)
+bench-card:
+	$(PY) $(HERE)report_card.py
+
 trans:
 	$(PY) $(HERE)translate.py --model_path $(CKPT) \
 	    --testset wmt22 --exemplar_set wmt21 --direction both \
