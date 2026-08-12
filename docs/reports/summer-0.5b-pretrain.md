@@ -5,7 +5,7 @@
 
 这份只记**底座怎么训出来的**。它走完下游翻译流水线的结果在
 [Interpreter 的 `docs/reports/summer-0.5b-downstream.md`](https://github.com/Ismantic/Interpreter/blob/main/docs/reports/summer-0.5b-downstream.md)
-——那三个「不报错只给错结果」的 bug 也在那边,因为出问题的代码在那个仓库。
+——下游那一段的坑也记在那边,因为出问题的代码在那个仓库。
 
 S0 接下来还要走另一条路:midtrain → SFT,做成通用 chat 模型
 (nanochat 那套)。所以它不只是 S1 的对照组。
@@ -86,8 +86,8 @@ hyp: Or will the restaurant be ready in a few days?   ← 基本译对
 | **Interpreter-Summer-0.5B** | **0.52B** | **13B** | **14.29 / 0.7460** | **30.93 / 0.7978** |
 
 参数量差 3.3 倍、预训练 token 差 2,700 倍,COMET 差 0.053。**译文流畅但不忠实,
-不到可用水平** —— 完整分析、三个 bug、以及排除掉的方向都在 Interpreter 那份
-记录里,这里不重复。
+不到可用水平** —— 完整分析和排除掉的方向都在 Interpreter 那份记录里,
+这里不重复。
 
 ## 发布
 
