@@ -311,6 +311,41 @@ health-service:
 	systemctl --user enable --now summer-health.service
 	@echo "已装并启动。看:  tail -5 output/health.csv"
 
+# ---------------------------------------------------------------- midtrain
+#
+# **让 <user> / <assistant> 不再是死向量。**
+#
+# 预训练语料全是纯文本,这三个特殊 token 从没作为**输入**出现过。实测 S1 权重
+# 里它们和 <pad> 的余弦相似度全是 +1.0000 —— 在模型眼里是同一个向量(普通
+# token 之间平均 0.285)。直接上 SFT 等于让模型在一个 epoch 里同时学任务和学
+# 这三个分隔符。nanochat 把这件事拆成 midtrain(整段算 loss,喂熟格式)+ SFT
+# (只在助手回复上算 loss),这里照它分。
+#
+# 学习率取 S0 末端的量级再往下一档:这是**继续预训练**不是从头训,大步长会把
+# 已有能力冲掉。cosine 衰到 10%,不用 WSD —— 步数是知道的(34.8M / 262144 ≈ 133
+# 步太少,所以把 accum 降到 4,变成 532 步)。
+MIDTRAIN    ?= $(OUT)/midtrain_1024
+MID         ?= $(OUT)/summer05b_mid
+MID_FROM    ?= $(OUT)/summer05b_s0
+MID_STEPS   ?= 532
+MID_BATCH   ?= 16
+MID_ACCUM   ?= 4
+
+midtrain:
+	$(PY) $(ROOT)/src/train.py \
+	    --model_path $(MID_FROM) --train_data $(MIDTRAIN).pt \
+	    --loss_mask $(MIDTRAIN).mask.pt --mode clm \
+	    --output_dir $(MID) \
+	    --max_seq_length 1024 --batch_size $(MID_BATCH) \
+	    --gradient_accumulation_steps $(MID_ACCUM) \
+	    --gradient_checkpointing --compile \
+	    --param_dtype float32 --ce_chunk 4096 \
+	    --max_steps $(MID_STEPS) --warmup_steps 50 \
+	    --lr_schedule cosine --min_lr_ratio 0.1 \
+	    --muon_lr 2e-3 --adam_lr 1e-4 \
+	    --max_grad_norm 1.0 --seed 42 --num_workers 0 \
+	    --save_steps 200 --logging_steps 20 --keep_ckpt 3
+
 # ---------------------------------------------------------------- S1 退火
 #
 # 单语跑到 S0_STEPS - 退火窗口(默认 45149 - 4514 = 40635)之后,换成带中英
@@ -438,7 +473,13 @@ bench:
 # 新版 datasets 已经不支持("Dataset scripts are no longer supported")。为了凑
 # 这两个指标去降级 datasets 不值得 —— 上面 `make bench` 那套里还有 piqa,
 # 那是历史缓存能读到的。
-BENCH_NC_TASKS ?= arc_easy:0,arc_challenge:0,mmlu:0,hellaswag:0,winogrande:0,boolq:0,openbookqa:0,gsm8k:8,humaneval:0,ceval-valid:0
+# **只留关键的五项。** 0.5B 这个量级上,hellaswag / winogrande / boolq /
+# openbookqa / humaneval 基本都贴着随机线,跑它们只是把噪声记下来。留下的是:
+#   ARC-E / ARC-C  常识推理,nanochat 报的主项,难度阶梯清楚
+#   MMLU           知识面,nanochat 报的主项
+#   GSM8K          数学,能看出 midtrain 掺 GSM8K 有没有用
+#   ceval-valid    中文 —— nanochat 没有,但我们是中英 50:50,只报英文会藏掉一半
+BENCH_NC_TASKS ?= arc_easy:0,arc_challenge:0,mmlu:0,gsm8k:8,ceval-valid:0
 
 bench-nanochat:
 	$(PY) $(HERE)benchmark.py --model_path $(CKPT) \
