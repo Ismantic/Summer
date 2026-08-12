@@ -5,7 +5,8 @@
 | [`WHY.md`](WHY.md) | **先看这个。** 各处设计选择的理由,以及改错了不报错的地方 |
 | [`PRETRAIN.md`](PRETRAIN.md) | 从零重做一遍的全流程 |
 | [`eval/pipeline.md`](eval/pipeline.md) | 评测栈 |
-| [`reports/`](reports/) | 历史实验记录(**写于四层改造之前**,路径已过期) |
+| [`reports/summer-0.5b.md`](reports/summer-0.5b.md) | **Summer-0.5B 的完整实验报告** —— 从零训 0.5B 双语底座,再走完下游翻译流水线。含三个「不报错只给错结果」的 bug |
+| [`reports/`](reports/) | 其余是历史实验记录(**写于四层改造之前**,路径已过期) |
 
 分工:层 README 讲「这一层解决什么问题」,`make help` 讲怎么跑,
 `WHY.md` 讲为什么。**同一件事只写在一处。**
