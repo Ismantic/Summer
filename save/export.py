@@ -91,7 +91,7 @@ llm = LLM(model=".", skip_tokenizer_init=True, dtype="bfloat16")
 ids = tok.encode("机器翻译的基本任务是", add_special_tokens=False)
 out = llm.generate([TokensPrompt(prompt_token_ids=ids)],
                    SamplingParams(temperature=0.0, max_tokens=64,
-                                  stop_token_ids=[tok.eos_token_id]))
+                                  stop_token_ids=tok.stop_token_ids))
 print(tok.decode(list(out[0].outputs[0].token_ids)))
 ```
 
@@ -222,7 +222,7 @@ out = []
 with torch.no_grad():
     for _ in range(40):
         nxt = int(model(x)[0, -1].argmax())
-        if nxt == tok.eos_token_id:
+        if nxt in tok.stop_token_ids:
             break
         out.append(nxt)
         x = torch.cat([x, torch.tensor([[nxt]], device=x.device)], dim=1)
@@ -272,7 +272,7 @@ outputs = llm.generate(
     [TokensPrompt(prompt_token_ids=tok.encode(p, add_special_tokens=False))
      for p in prompts],
     SamplingParams(temperature=0.0, max_tokens=64,
-                   stop_token_ids=[tok.eos_token_id]),
+                   stop_token_ids=tok.stop_token_ids),
 )
 
 for prompt, out in zip(prompts, outputs):

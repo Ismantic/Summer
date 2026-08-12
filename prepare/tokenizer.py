@@ -164,6 +164,22 @@ class PieceTokenizerWrapper:
     def vocab_size(self):
         return self._tok.vocab_size()
 
+    @property
+    def stop_token_ids(self):
+        """生成时该停下的 token 集合。
+
+        **同时认 `<end>` 和 `<eos>`,是有意的向后兼容。** 新的对话格式用专用的
+        `<end>`(81902);但 Summer-0.5B-S0 / -S1 和 ReTok 那条线的已发布模型是
+        用 `<eos>` 训的,它们不认识 `<end>`。推理侧统一用这个集合,一份代码同时
+        伺候两代模型 —— 多认一个停止符不会让新模型提前停(它不会去生成 `<eos>`,
+        那个 token 在它的对话数据里出现 0 次)。
+        """
+        ids = [self.eos_token_id]
+        end = getattr(self, "end_token_id", None)
+        if end is not None and end != self.eos_token_id:
+            ids.append(end)
+        return ids
+
     def encode(self, text, add_special_tokens=False):
         ids = self._tok.encode_as_ids(text)
         if add_special_tokens:

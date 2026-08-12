@@ -36,7 +36,7 @@ def generate(model, tok, prompt: str, max_new: int, temperature: float,
              top_p: float, device: str) -> str:
     ids = tok.encode(prompt, add_special_tokens=False)
     x = torch.tensor([ids], device=device)
-    eos = tok.eos_token_id
+    stops = set(tok.stop_token_ids)
     out = []
     for _ in range(max_new):
         # 没有 KV cache —— 每步重算整个前缀。短续写够用,长文本会慢。
@@ -49,7 +49,7 @@ def generate(model, tok, prompt: str, max_new: int, temperature: float,
             keep = (torch.cumsum(srt, 0) - srt) < top_p
             srt, idx = srt[keep], idx[keep]
             nxt = int(idx[torch.multinomial(srt / srt.sum(), 1)])
-        if nxt == eos:
+        if nxt in stops:
             break
         out.append(nxt)
         x = torch.cat([x, torch.tensor([[nxt]], device=device)], dim=1)

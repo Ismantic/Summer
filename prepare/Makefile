@@ -347,7 +347,7 @@ S2_CHAT    ?= $(OUT)/chat_pretrain_1024
 S2_SHARDS   = $(shell ls $(S2_DATA).s*.pt $(S2_CHAT).pt 2>/dev/null | paste -sd,)
 
 encode-chat-pretrain:
-	$(PY) -m prepare.chat --mix chat_pretrain \
+	cd $(ROOT) && $(PY) -m prepare.chat --mix chat_pretrain \
 	    --output $(S2_CHAT) --total_tokens 250000000 --seq_length 1024
 
 s2:
