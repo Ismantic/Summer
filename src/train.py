@@ -403,6 +403,10 @@ def train(args):
     model.train()
     step = 0
     micro_step = 0
+    # 日志用:一个 optimizer step 内所有 micro-batch 的 loss 之和(每个已经除过
+    # accum,所以和就是均值),以及它的 EMA。
+    step_loss_sum = 0.0
+    loss_ema: float | None = None
     epoch, consumed = 0, 0
     t0 = time.time()
     interrupted = False
@@ -550,6 +554,7 @@ def train(args):
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
 
+            step_loss_sum += loss.item()
             loss.backward()
             micro_step += 1
 
@@ -561,11 +566,22 @@ def train(args):
                 optimizer.zero_grad()
                 step += 1
 
+                # **loss 要取整个 step 的平均,不是最后一个 micro-batch 的。**
+                # 原来写的是 `loss.item() * accum`,那只是把最后一个 micro-batch
+                # 的值还原回去 —— accum=4 时报的是四分之一的数据,波动 ±0.25,
+                # 曾经让我误判成 loss 在上升。EMA 是给趋势用的:单点波动比整段
+                # 的下降幅度还大,**要拿 loss 下结论必须看 EMA**。
+                # nanochat 也只打 EMA(mid_train.py 的 ema_beta = 0.9)。
+                step_loss = step_loss_sum
+                loss_ema = (step_loss if loss_ema is None
+                            else 0.9 * loss_ema + 0.1 * step_loss)
+                step_loss_sum = 0.0
+
                 if step % args.logging_steps == 0:
                     elapsed = time.time() - t0
                     lrs = [f"{g['lr']:.6f}" for g in optimizer.param_groups]
-                    real_loss = loss.item() * args.gradient_accumulation_steps
-                    log(f"step {step}/{args.max_steps} | loss {real_loss:.4f} | "
+                    log(f"step {step}/{args.max_steps} | loss {step_loss:.4f} | "
+                        f"ema {loss_ema:.4f} | "
                         f"lr [{', '.join(lrs)}] | {elapsed:.1f}s")
 
                 if args.save_steps > 0 and step % args.save_steps == 0:
