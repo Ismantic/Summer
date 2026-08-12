@@ -69,8 +69,16 @@ class PreTokenizedDataset(Dataset):
     转换挪到逐条取数据的时候。多个 shard 用逗号分隔,当一份连续数据用 ——
     12B token 分 12 份,既是为了编码时能并行、断点续,也是为了单个文件别太大。
     """
-    def __init__(self, pt_files):
+    def __init__(self, pt_files, mask_files=None):
         paths = [p.strip() for p in str(pt_files).split(",") if p.strip()]
+        # **掩码也 mmap,一一对应。** midtrain/SFT 只在助手回复上算 loss;
+        # 没有掩码就是预训练那样整段算(mask 恒为 1)。
+        mpaths = [p.strip() for p in str(mask_files or "").split(",") if p.strip()]
+        if mpaths and len(mpaths) != len(paths):
+            raise ValueError(
+                f"掩码文件数({len(mpaths)})和数据文件数({len(paths)})不一致 —— "
+                f"它们必须一一对应,错位会让 loss 算在错误的位置上而不报错。")
+        self.masks = [torch.load(m, weights_only=True, mmap=True) for m in mpaths]
         self.shards, self.starts, total, seq_len = [], [], 0, None
         for p in paths:
             t = torch.load(p, weights_only=True, mmap=True)
@@ -92,11 +100,20 @@ class PreTokenizedDataset(Dataset):
 
     def __getitem__(self, index):
         # 从后往前找所属 shard —— shard 数是十几个,线性扫比二分更简单也够快
-        for start, shard in zip(reversed(self.starts), reversed(self.shards)):
+        shard_i = 0
+        for k, (start, shard) in enumerate(zip(reversed(self.starts),
+                                               reversed(self.shards))):
             if index >= start:
                 tokens = shard[index - start].long()
+                shard_i = len(self.shards) - 1 - k
+                local = index - start
                 break
-        return dict(input_ids=tokens, labels=tokens.clone(),
+        labels = tokens.clone()
+        if self.masks:
+            # mask=0 的位置置成 IGNORE_INDEX —— 用户那段不算 loss。
+            keep = self.masks[shard_i][local].bool()
+            labels[~keep] = IGNORE_INDEX
+        return dict(input_ids=tokens, labels=labels,
                     attention_mask=torch.ones_like(tokens, dtype=torch.bool))
 
 
@@ -314,7 +331,7 @@ def train(args):
             f"--train_data 必须是预编码的 .pt,收到 {args.train_data}\n"
             f"  先跑 `make -C prepare encode`(或 prepare/encode_corpus.py)。\n"
             f"  src/ 不碰文本 —— 分词属于 prepare/ 那一层。")
-    dataset = PreTokenizedDataset(args.train_data)
+    dataset = PreTokenizedDataset(args.train_data, args.loss_mask)
 
     sampler = None
     if is_distributed:
@@ -660,6 +677,10 @@ if __name__ == "__main__":
                              "wsd 恒定到末段再退火,适合总步数没定死的从零预训练。")
     parser.add_argument("--lr_decay_steps", type=int, default=0,
                         help="wsd 的退火窗口(最后多少步)。0 = max_steps 的 10%%。")
+    parser.add_argument("--loss_mask", default=None,
+                        help="与 --train_data 一一对应的掩码 .pt(uint8,1=算 loss)。"
+                             "midtrain/SFT 用;不给就整段算 loss(预训练那样)。"
+                             "由 prepare/chat.py 产出。")
     parser.add_argument("--seed", type=int, default=42,
                         help="初始化、数据顺序、dropout 的种子。--resume_from 会覆盖成"
                              "存下来的那份,保证续训和不中断跑出来的轨迹一致。")
