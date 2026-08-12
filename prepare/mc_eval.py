@@ -56,6 +56,15 @@ import json
 import os
 import sys
 
+# **评测不该依赖网络。** 四个数据集都在本地 HF 缓存里,但 load_dataset 每次仍会
+# 去请求元数据;这台机器过代理,代理一抖就整个卡住 —— 实测卡了 15 分钟,GPU
+# 利用率 0%、进程 sleeping,而且脚本在任务结束前不打任何进度,**看起来和正常跑
+# 没区别**。离线模式下缓存缺失会立刻报错,那比静默挂住好得多。
+# 要下新数据集时用 SUMMER_MC_ONLINE=1 关掉。
+if not os.environ.get("SUMMER_MC_ONLINE"):
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+
 import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -165,6 +174,7 @@ def main() -> int:
         if name not in TASKS:
             print(f"  跳过未知任务 {name}")
             continue
+        print(f"  {name:14s} 读数据…", flush=True)   # 卡住时能看出卡在哪
         rows = TASKS[name]()
         if a.max_problems:
             rows = rows[:a.max_problems]
