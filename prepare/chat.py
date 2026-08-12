@@ -117,8 +117,13 @@ from prepare.tokenizer import (PieceTokenizerWrapper,           # noqa: E402
 MIDTRAIN_WEIGHTS = {
     "SmolTalk": 0.19,          # en 对话  ≈ 6.5M,与中文侧对齐
     "COIG_CQIA": 0.19,         # zh 对话  ≈ 6.5M,全量
-    "MMLU_AuxTrain": 0.48,     # en 多选题型 ≈ 17M
-    "C3_Train": 0.10,          # zh 多选题型 ≈ 3.4M,全量 11869 条
+    "MMLU_AuxTrain": 0.48,     # en 多选题型  实得 35.2M
+    # **实际只拿到 2.4M,不是 0.10 对应的 10.6M** —— C3 全量就 11869 条,
+    # 抽干了。规划权重是上限不是保证,缺口被 SmolTalk 顶上(实得 47.5M)。
+    # 所以中文多选实占 2.4%,而英文多选占 35.2%,相差 15 倍。够不够是待验的:
+    # 模型在英文里已经把「看到选项→答字母」学到 0.99,中文缺的是触发,不是
+    # 从零学这个行为。不够的话下一个候选是 ChID(成语选填,CLUE,train 很大)。
+    "C3_Train": 0.10,          # zh 多选题型  实得 2.4M(见上)
     "GSM8K_Train": 0.04,       # 数学/分步推理 ≈ 1.3M,全量
 }
 
