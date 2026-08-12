@@ -336,15 +336,17 @@ S2         ?= $(OUT)/summer05b_s2
 S2_DATA    ?= $(OUT)/scratch2_1024
 S2_FROM    ?= $(S0)/checkpoint-45000
 S2_STEPS   ?= 79000
-# **对话格式也掺进预训练。** 纯文本 shard + 对话 shard 并列喂进去 ——
-# 让 <user> / <assistant> 跟着 10B token 一起训。S0 训完 11.8B 之后这三个
-# token 的余弦还是 +1.0000(预训练里出现 0 次),靠事后 34.8M 的 midtrain 只
-# 推到 0.97;掺进来能给约 250M 的曝光,是 midtrain 的 7 倍。
+# **S2 只用纯文本,对话格式不掺进来。**
 #
-# 对话那份**整段算 loss,不带 mask** —— 格式与纯文本 shard 完全一致,所以能
-# 直接并进同一个 --train_data 列表,训练侧一行都不用改。
-S2_CHAT    ?= $(OUT)/chat_pretrain_1024
-S2_SHARDS   = $(shell ls $(S2_DATA).s*.pt $(S2_CHAT).pt 2>/dev/null | paste -sd,)
+# 一度打算把对话掺进预训练(让 <bos>/<user>/<assistant>/<end> 跟着 10B token
+# 一起训),但决定保持阶段职责分明:预训练只学语言,对话格式统一在 midtrain 学。
+#
+# 依据是实测:midtrain 跑 200 步就把这几个 token 的余弦从 +1.0000 推到 0.985,
+# 而 midtrain 现在有 103M token(旧版 34.8M)—— 掺进预训练能多给的曝光有限,
+# 换来的却是「预训练数据不纯」这个长期的理解成本。
+#
+# 对话数据仍然编在 output/chat_pretrain_1024.pt,给 midtrain 用(见下面 MIDTRAIN)。
+S2_SHARDS   = $(shell ls $(S2_DATA).s*.pt 2>/dev/null | paste -sd,)
 
 encode-chat-pretrain:
 	cd $(ROOT) && $(PY) -m prepare.chat --mix chat_pretrain \
@@ -381,7 +383,7 @@ s2:
 # 学习率取 S0 末端的量级再往下一档:这是**继续预训练**不是从头训,大步长会把
 # 已有能力冲掉。cosine 衰到 10%,不用 WSD —— 步数是知道的(34.8M / 262144 ≈ 133
 # 步太少,所以把 accum 降到 4,变成 532 步)。
-MIDTRAIN    ?= $(OUT)/midtrain_1024
+MIDTRAIN    ?= $(OUT)/chat_pretrain_1024
 MID         ?= $(OUT)/summer05b_mid
 MID_FROM    ?= $(OUT)/summer05b_s0
 MID_STEPS   ?= 532

@@ -337,6 +337,25 @@ def main() -> int:
 
         pool: list[tuple[list[int], list[int]]] = []
 
+        def pack_stream(items):     # 目前没有调用方,见下面的说明
+            """**预训练用:连续流,不 padding。** 当前未启用。
+
+            留着是因为「掺对话进预训练」这个选项还可能回来 —— 那时对话数据要按
+            预训练规则打包(连续流),而不是 SFT 规则(补 pad)。走错了的后果是
+            5.6% 的 <pad> 被当成正常 token 训练(预训练不传 --loss_mask)。
+
+            与 SFT 的 pack() 相反 —— nanochat 也是按阶段分开的:预训练截断填满
+            (文档用不完,算力宝贵),SFT 补 pad(数据稀缺,一条不能丢)。
+            """
+            nonlocal buf_i, buf_m
+            for ii, mm in items:
+                buf_i.extend(ii); buf_m.extend(mm)
+                while len(buf_i) >= seq_len:
+                    all_ids.append(np.asarray(buf_i[:seq_len], dtype=np.int32))
+                    all_mask.append(np.asarray(buf_m[:seq_len], dtype=np.uint8))
+                    del buf_i[:seq_len], buf_m[:seq_len]
+            items.clear()
+
         def pack(items, final=False):
             """**best-fit**:每行反复挑「最大的还装得下的」,装不下才 pad。
 

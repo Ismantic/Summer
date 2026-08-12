@@ -382,6 +382,11 @@ def worker_process_shard(args):
     # 这条路径就这么坏过一次:v18 之后没再跑过预编码,直到 2026-07-27 才发现。
     tok.load(tok_model, cn_dict)
     eos = tok.piece_to_id("</s>")
+    # **预训练不放 <bos>,只在文档末尾放 <eos>。**
+    #
+    # 一度改成前置 <bos>(对齐 nanochat 的 dataloader),但回退了:S0 已经用现在
+    # 这套训了 11.8B token,S2 是在它上面续训,换分隔格式会引入分布不一致。
+    # <bos> / <user> / <assistant> / <end> 统一放到 midtrain 和 SFT 阶段去学。
 
     target_chunks = max(1, target_tokens // seq_len)
     out = np.empty((target_chunks, seq_len), dtype=np.int32)
