@@ -346,6 +346,39 @@ midtrain:
 	    --max_grad_norm 1.0 --seed 42 --num_workers 0 \
 	    --save_steps 200 --logging_steps 20 --keep_ckpt 3
 
+# SFT:**从 midtrain 的产物起,不是从 S0 起。**
+#
+# midtrain 已经把对话格式喂熟(特殊 token 的余弦从 1.0000 分化到 0.97),SFT 这一
+# 步才专心学「答得好」。跳过 midtrain 直接 SFT 就是 Interpreter 那边踩过的坑:
+# 一个 epoch 里同时学任务和学分隔符,两头落空。
+#
+# 只在助手回复上算 loss(--loss_mask,监督比例 88.3%)—— 用户那段不算,否则模型
+# 会去学「怎么生成问题」,那不是要的能力,还会稀释真正的监督信号。
+#
+# lr 比 midtrain 再低一档:数据更少(12M)、目标更精细,大步长会把 midtrain 学到的
+# 格式冲散。
+SFT_DATA   ?= $(OUT)/sft_1024
+SFT_OUT    ?= $(OUT)/summer05b_sft
+SFT_FROM   ?= $(OUT)/summer05b_mid
+SFT_STEPS  ?= 366
+SFT_BATCH  ?= 16
+SFT_ACCUM  ?= 2
+
+sft-chat:
+	$(PY) $(ROOT)/src/train.py \
+	    --model_path $(SFT_FROM) --train_data $(SFT_DATA).pt \
+	    --loss_mask $(SFT_DATA).mask.pt --mode clm \
+	    --output_dir $(SFT_OUT) \
+	    --max_seq_length 1024 --batch_size $(SFT_BATCH) \
+	    --gradient_accumulation_steps $(SFT_ACCUM) \
+	    --gradient_checkpointing --compile \
+	    --param_dtype float32 --ce_chunk 4096 \
+	    --max_steps $(SFT_STEPS) --warmup_steps 30 \
+	    --lr_schedule cosine --min_lr_ratio 0.1 \
+	    --muon_lr 5e-4 --adam_lr 3e-5 \
+	    --max_grad_norm 1.0 --seed 42 --num_workers 0 \
+	    --save_steps 150 --logging_steps 20 --keep_ckpt 2
+
 # ---------------------------------------------------------------- S1 退火
 #
 # 单语跑到 S0_STEPS - 退火窗口(默认 45149 - 4514 = 40635)之后,换成带中英
