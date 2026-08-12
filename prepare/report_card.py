@@ -32,18 +32,27 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS = os.path.join(ROOT, "eval_results", "nanochat")
 
-# nanochat d20 的公开成绩(speedrun 档,SFT 之后;base 只公开了 CORE 0.2219)。
-# 出处:https://github.com/karpathy/nanochat/discussions/1
-# **注意:口径未必一致。** nanochat 用自己的 harness,这几个数是 acc 还是
-# acc_norm 没有公开说明。实测 Qwen3-0.6B-Base 上两者能差 0.07(arc_easy
-# acc 0.6549 / acc_norm 0.5816,arc_challenge 反过来 0.3345 / 0.3823)——
-# 也就是说光靠一个数字对不上号。所以这一列只当**量级参考**,不做精确比较。
+# nanochat d20 的成绩,取自**官方 chatsft checkpoint 自带的 meta_000650.json**
+# (比 discussion 帖子里的数更可靠,那份是 arc_easy 0.3876 / mmlu 0.3151 /
+#  gsm8k 0.0455,与 meta 不一致)。同一份 meta 还记着 val_loss 1.0725。
+#
+# **这一列和我们的数不可比,而且不是「口径未知」这种不可比 —— 是协议不同。**
+# 读了 nanochat 的 tasks/arc.py + scripts/chat_eval.py 之后确认:
+#
+#   nanochat   prompt 渲染成 "Multiple Choice question: ...",选项后面跟字母,
+#              让模型输出**一个字母**,logits 只在字母 token 上取 argmax,比字母
+#   lm_eval    不给字母,比各选项**正文**的对数似然(acc / acc_norm 都是这个族)
+#
+# 所以纠结 acc 还是 acc_norm 是问错了问题,两个都不是。字母 MC 要求模型把
+# 「答案」映射到「字母」,对小模型明显更难,而且得 SFT 之后才做得到 ——
+# **我们 ARC-Easy 比这一列高不能算赢。** 这一列只作量级参照。
+#
+# 要真比就得实现它那套协议(render_mc + 字母上 argmax),那是另一件事。
 NANOCHAT_D20 = {
-    "arc_easy": 0.3876,
-    "arc_challenge": 0.2807,
-    "mmlu": 0.3151,
-    "gsm8k": 0.0455,
-    "humaneval": 0.0854,
+    "arc_easy": 0.4033,
+    "mmlu": 0.3232,
+    "gsm8k": 0.03125,
+    "humaneval": 0.03125,
 }
 
 # 任务 → (显示名, 该任务里用哪个指标, 随机基线)
@@ -109,7 +118,7 @@ def main() -> int:
 
     print("nanochat 口径的报告卡")
     print(f"  外部靶子 nanochat d20:560M 参数 / 约 11B token(我们 524M / 13B)")
-    print(f"  它那几个数是 **SFT 之后**的;底座还没 midtrain/SFT 的话差距是起点不是终局\n")
+    print(f"  d20 一列取自官方 checkpoint 的 meta;**协议不同(字母 MC vs 似然),不可直接比大小**\n")
     hdr = f"{'任务':<12}{'随机':>7}{'d20':>8}" + "".join(f"{t:>{w}}" for t in tags)
     print(hdr)
     print("-" * len(hdr))
