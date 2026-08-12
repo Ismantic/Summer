@@ -311,6 +311,51 @@ health-service:
 	systemctl --user enable --now summer-health.service
 	@echo "已装并启动。看:  tail -5 output/health.csv"
 
+encode-scratch2:
+	$(PY) $(HERE)encode_corpus.py --mix scratch2 \
+	    --tokenizer_model $(PIECE) --cn_dict $(CN_DICT) \
+	    --output $(S2_DATA) --total_tokens 10000000000 --seq_length 1024 \
+	    --shard_output --num_workers 6 --max_tokens_per_shard 250000000
+
+# ---------------------------------------------------------------- S2 续训
+#
+# **在 S0 的 45,149 步之后继续训,不是从头。**
+#
+# 目标:英文 token 追上 nanochat d20 的 11.2B。我们 13B 里只有一半是英文
+# (约 6.5B),所以英文基准上实际是「6.5B 英文模型」对它的「11.2B」——
+# MMLU 0.2594(随机)对它 0.3151 就是这么来的。
+#
+# **WSD 让这件事不用改学习率。** decay_start = max_steps - lr_decay_steps;
+# 把 max_steps 从 45,149 拉到 S2_STEPS,decay_start 跟着后移,从 45,149 续上时
+# step < decay_start,lr 自动回到稳定段的 0.02。这正是当初选 WSD 而不是 cosine
+# 的理由(见 docs/WHY.md 第四点五)—— 总步数在开跑时不可知。
+#
+# **--reset_data_position 不能省。** 新语料是另一批 shard,不清零的话会从旧的
+# 数据偏移开始读,前面一大段直接跳过而且不报错。
+S2         ?= $(OUT)/summer05b_s2
+S2_DATA    ?= $(OUT)/scratch2_1024
+S2_FROM    ?= $(S0)/checkpoint-45000
+S2_STEPS   ?= 79000
+S2_SHARDS   = $(shell ls $(S2_DATA).s*.pt 2>/dev/null | paste -sd,)
+
+s2:
+	@test -n "$(S2_SHARDS)" || { echo "没有 $(S2_DATA).s*.pt —— 先 make encode-scratch2"; exit 2; }
+	$(PY) $(ROOT)/src/train.py \
+	    --model_path $(INIT_S) --resume_from $(S2_FROM) \
+	    --reset_data_position \
+	    --train_data "$(S2_SHARDS)" --mode clm \
+	    --output_dir $(S2) \
+	    --max_seq_length 1024 --batch_size $(S0_BATCH) \
+	    --gradient_accumulation_steps $(S0_ACCUM) \
+	    --gradient_checkpointing --compile \
+	    --param_dtype float32 --ce_chunk 4096 \
+	    --max_steps $(S2_STEPS) --warmup_steps 2000 \
+	    --lr_schedule wsd --lr_decay_steps $$(( $(S2_STEPS) / 10 )) \
+	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
+	    --max_grad_norm 1.0 --seed 42 --num_workers $(S0_WORKERS) \
+	    --save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
+	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S2)/bleu_curve.jsonl'
+
 # ---------------------------------------------------------------- midtrain
 #
 # **让 <user> / <assistant> 不再是死向量。**

@@ -18,16 +18,22 @@
 nanochat 把这件事拆成 midtrain(先用对话格式的数据把模板喂熟,整段算 loss)
 和 SFT(只在助手那部分算 loss),这里照它分。
 
-## 打包,不 padding
+## 打包:best-fit,只放完整对话,尾部补 pad
 
-**自写的模型只做 is_causal 的因果注意力,不接受 attention_mask**
-(见 src/model.py 与 src/train.py:202)。padding 进来会被当成真 token 参与
-注意力,算出来的东西是错的 —— 而且不报错。
+**每条序列里的对话都是完整的。** 早先的做法是把对话首尾相接后按 seq_len 切,
+于是一条序列可能从半截对话开始、也可能在半截处结束 —— 那种上下文推理时永远
+不会出现,等于拿模型没见过的分布去训它。
 
-所以这里把多条对话首尾相接打包成定长 seq_len,完全没有 padding。代价是
-一条序列里可能横跨两段对话,因果注意力会让后半段"看到"前半段。nanochat
-接受这个代价,我们也接受:边界处的噪声远小于 padding 算错的代价,而且
-每条序列平均只有一到两个边界。
+现在改成:攒满就换新序列,尾部用 pad 补齐并 mask=0 掩掉。
+
+**尾部 padding 在因果注意力下是安全的。** 自写的模型只做 is_causal,不接受
+attention_mask;但 pad 在序列末尾 —— 后面的 pad 看得见前面的真内容,前面的真
+内容看不见后面的 pad(因果),而 pad 位置本身 mask=0 不参与 loss。会算错的是
+**左侧或中间**填充,不是尾部。
+
+**用 best-fit 而不是 first-fit**(与 nanochat 的 chat_sft.py 一致):每次从待放
+池里挑**最大的能装下的**那一段,而不是按顺序装。first-fit 实测填充率 25.6%,
+best-fit 能压到个位数 —— 差别就是四分之一的算力在训 pad 还是在训数据。
 
 ## 掩码
 
@@ -254,7 +260,12 @@ def encode_turns(tok, turns, seq_len):
             i += 1
             continue
 
-        if len(turn_ids) + 1 > seq_len:
+        # **前缀不一定只有 bos** —— 有 system 时是 bos + 内容 + system_token。
+        # 早先写成 len(turn_ids)+1,于是带 system 的样本会拼出超过 seq_len 的段,
+        # 一路漏到 np.stack 才报「shape 不一致」。
+        prefix_len = 1 + (len(tok.encode(sys_content, add_special_tokens=False)) + 1
+                          if sys_content else 0)
+        if prefix_len + len(turn_ids) > seq_len:
             continue                      # 单轮就超长,这一轮丢掉
         if len(ids) + len(turn_ids) > seq_len:
             if any(mask):                 # 上一段有监督内容才留
@@ -296,10 +307,67 @@ def main() -> int:
     all_ids: list[np.ndarray] = []
     all_mask: list[np.ndarray] = []
     actual = {}
+    padded = 0
     for name, want in budget.items():
         buf_i: list[int] = []
         buf_m: list[int] = []
         got = dropped = split = 0
+        pad_id = tok.pad_token_id
+
+        pool: list[tuple[list[int], list[int]]] = []
+
+        def pack(items, final=False):
+            """**best-fit**:每行反复挑「最大的还装得下的」,装不下才 pad。
+
+            与 nanochat 的 chat_sft.py 一致。first-fit(按顺序装)实测填充率
+            25.6%,best-fit 能压到个位数 —— 差的是四分之一算力训 pad 还是训数据。
+            """
+            items.sort(key=lambda x: -len(x[0]))
+            used = [False] * len(items)
+            n_left = len(items)
+            while n_left:
+                row_i: list[int] = []
+                row_m: list[int] = []
+                progressed = True
+                while progressed:
+                    progressed = False
+                    for k, (ii, mm) in enumerate(items):
+                        if used[k]:
+                            continue
+                        if len(row_i) + len(ii) <= seq_len:
+                            row_i.extend(ii); row_m.extend(mm)
+                            used[k] = True; n_left -= 1
+                            progressed = True
+                            break            # 已按长度降序,第一个装得下的就是最大的
+                if not row_i:
+                    break
+                _emit(row_i, row_m)
+            items[:] = [it for k, it in enumerate(items) if not used[k]]
+
+        def _emit(row_i, row_m):
+            nonlocal padded
+            if len(row_i) > seq_len:
+                raise AssertionError(
+                    f"打包出了长度 {len(row_i)} 的序列,超过 seq_len={seq_len}")
+            n_pad = seq_len - len(row_i)
+            padded += n_pad
+            all_ids.append(np.asarray(row_i + [pad_id] * n_pad, dtype=np.int32))
+            all_mask.append(np.asarray(row_m + [0] * n_pad, dtype=np.uint8))
+
+        def flush():
+            """把 buf 里剩下的补成一条完整序列。**长度必须恰好 seq_len** ——
+            差一个都会让 np.stack 报 shape 不一致。"""
+            nonlocal buf_i, buf_m, padded
+            if not buf_i:
+                return
+            if len(buf_i) > seq_len:      # 早炸,别等到 np.stack
+                raise AssertionError(
+                    f"打包出了长度 {len(buf_i)} 的序列,超过 seq_len={seq_len}")
+            n_pad = seq_len - len(buf_i)
+            padded += n_pad
+            all_ids.append(np.asarray(buf_i + [pad_id] * n_pad, dtype=np.int32))
+            all_mask.append(np.asarray(buf_m + [0] * n_pad, dtype=np.uint8))
+            buf_i, buf_m = [], []
         for turns in iter_turns(name):
             segs = encode_turns(tok, turns, seq_len)
             if not segs:
@@ -310,14 +378,15 @@ def main() -> int:
             for ids, mask in segs:
                 if a.mix == "midtrain":
                     mask = [1] * len(ids)  # midtrain 整段算 loss
-                buf_i.extend(ids); buf_m.extend(mask)
+                pool.append((ids, mask))
                 got += len(ids)
-            while len(buf_i) >= seq_len:
-                all_ids.append(np.asarray(buf_i[:seq_len], dtype=np.int32))
-                all_mask.append(np.asarray(buf_m[:seq_len], dtype=np.uint8))
-                del buf_i[:seq_len], buf_m[:seq_len]
+            # 池子攒够了就 best-fit 打包一批,不用等全部读完(那要占几个 G 内存)
+            if len(pool) >= 4000:
+                pack(pool)
             if got >= want:
                 break
+        if pool:                       # 收尾:池子里剩下的也打包掉
+            pack(pool, final=True)
         actual[name] = got
         print(f"  {name:16s} 实得 {got:,} token"
               f"(切成多段 {split:,} 条,整条丢弃 {dropped:,} 条)")
@@ -341,7 +410,7 @@ def main() -> int:
     with open(a.output + ".mix.json", "w") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"\n写出 {arr.shape[0]:,} 条 × {seq_len} = {arr.size:,} token")
-    print(f"  被监督的比例 {ratio * 100:.1f}%")
+    print(f"  被监督的比例 {ratio * 100:.1f}%  |  尾部填充 {padded / arr.size * 100:.1f}%")
     print(f"  {a.output}.pt / .mask.pt / .mix.json")
     return 0
 

@@ -105,6 +105,33 @@ SCRATCH_WEIGHTS = {
 #
 # 中 / 英 / 双语 = 0.35 / 0.35 / 0.30。平行数据本身两个方向各半,所以实际的
 # 语言曝光大致还是对半。
+# S2 续训:**英文 65% / 中文 35%**,不是 S0 那样的 50:50。
+#
+# 目标是让英文 token 追上并超过 nanochat d20 的 11.2B。S0 的 13B 里只有约 6.5B
+# 是英文,所以在英文基准上我们实际是「6.5B 英文模型」对它的「11.2B」——
+# MMLU 0.2594(随机)对它 0.3151 就是这么来的。
+#
+# 为什么偏英文而不是继续 50:50:同样让英文到 11B+,65:35 只要新增约 10B,
+# 50:50 要 14B。而中文那边我们本来也在随机线(C-Eval 0.2608),少 0.5B 没有
+# 实质损失 —— 把预算花在能出成绩的那一侧。
+#
+# 各源内部的相对权重沿用 S0 的配方(那套跑出来的 loss 曲线正常),只是按 65:35
+# 重新归一化。
+SCRATCH2_WEIGHTS = {
+    # ---------------- EN 0.65 ----------------
+    "FineWebEdu":     0.234,
+    "Cosmopedia":     0.156,
+    "Wikipedia_EN":   0.130,
+    "CC_EN":          0.091,
+    "Gutenberg":      0.039,
+    # ---------------- CN 0.35 ----------------
+    "CCI3-HQ":        0.098,
+    "SkyPile":        0.091,
+    "CN_FineWeb_Edu": 0.084,
+    "CC_CN":          0.049,
+    "Wikipedia_CN":   0.028,
+}
+
 ANNEAL_MT_WEIGHTS = {
     # ---------------- EN 0.35 ----------------
     "FineWebEdu":     0.14,
@@ -428,7 +455,7 @@ def build_shards(weights, total_tokens, n_workers, tmpdir, seq_len, max_line_cha
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--mix", choices=["main", "anneal", "scratch", "anneal_mt"], required=True)
+    p.add_argument("--mix", choices=["main", "anneal", "scratch", "scratch2", "anneal_mt"], required=True)
     p.add_argument("--tmpdir", default="",
                    help="worker 中间 .npy 的落地目录。默认与 --output 同目录 ——"
                         "中间文件总量等于产物大小,放 /tmp 会撑爆 tmpfs。")
@@ -456,7 +483,8 @@ def main():
     args = p.parse_args()
 
     weights = {"main": MAIN_WEIGHTS, "anneal": ANNEAL_WEIGHTS,
-               "scratch": SCRATCH_WEIGHTS, "anneal_mt": ANNEAL_MT_WEIGHTS}[args.mix]
+               "scratch": SCRATCH_WEIGHTS, "scratch2": SCRATCH2_WEIGHTS,
+               "anneal_mt": ANNEAL_MT_WEIGHTS}[args.mix]
     print(f"Mix: {args.mix} | sources: {len(weights)} | total weight {sum(weights.values()):.3f}")
     print(f"Budget: {args.total_tokens:,} tokens "
           f"({args.total_tokens // args.seq_length:,} chunks of {args.seq_length})")
