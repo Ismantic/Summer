@@ -20,6 +20,7 @@
 #   make bench      mono 六任务(vLLM + lm_eval)
 #   make trans      WMT22 翻译 BLEU + COMET
 #   make sweep      多个 ckpt 批量评测 + 出对照表
+#   make mc-eval    nanochat 的字母 MC 协议 —— 量指令跟随,和上面的似然打分不可比
 #
 # 全流程:deps → (make -C data download) → retok → encode → p1 → p2
 #
@@ -577,6 +578,20 @@ bench-nanochat:
 	$(PY) $(HERE)benchmark.py --model_path $(CKPT) \
 	    --tasks "$(BENCH_NC_TASKS)" \
 	    --output_dir $(ROOT)/eval_results/nanochat/$(TAG)
+
+# nanochat 的**字母 MC** 协议:题面渲染成 Multiple Choice、模型输出一个字母。
+#
+# **和 bench-nanochat 量的不是一回事,两个都要留。** lm_eval 的 acc/acc_norm 是
+# 比各选项正文的对数似然,量底座知识;字母 MC 要求模型听懂「只回答字母」,量的是
+# 指令跟随 —— 那正是 midtrain + SFT 要加的能力。同一个 S0、同一批 ARC-Easy 题,
+# 似然协议 0.5564、字母协议 0.2563,差 0.30。**别把两边的数混着比。**
+#
+# 协议实现校验过:拿 nanochat 官方 d20 跑同一套打分得 0.3994,官方 meta 是
+# 0.4033,差 -0.0039。校验脚本见 docs/reports/summer-0.5b-pretrain.md 的说明。
+MC_TASKS ?= arc_easy,arc_challenge,mmlu,ceval
+
+mc-eval:
+	$(PY) $(HERE)mc_eval.py --model_path $(CKPT) --tasks "$(MC_TASKS)" 	    --output_path $(ROOT)/eval_results/mc/$(TAG).json
 
 # 把 eval_results/nanochat/ 下的结果排成一张对照表(含 nanochat d20 的数)
 bench-card:
