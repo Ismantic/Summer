@@ -336,7 +336,19 @@ S2         ?= $(OUT)/summer05b_s2
 S2_DATA    ?= $(OUT)/scratch2_1024
 S2_FROM    ?= $(S0)/checkpoint-45000
 S2_STEPS   ?= 79000
-S2_SHARDS   = $(shell ls $(S2_DATA).s*.pt 2>/dev/null | paste -sd,)
+# **对话格式也掺进预训练。** 纯文本 shard + 对话 shard 并列喂进去 ——
+# 让 <user> / <assistant> 跟着 10B token 一起训。S0 训完 11.8B 之后这三个
+# token 的余弦还是 +1.0000(预训练里出现 0 次),靠事后 34.8M 的 midtrain 只
+# 推到 0.97;掺进来能给约 250M 的曝光,是 midtrain 的 7 倍。
+#
+# 对话那份**整段算 loss,不带 mask** —— 格式与纯文本 shard 完全一致,所以能
+# 直接并进同一个 --train_data 列表,训练侧一行都不用改。
+S2_CHAT    ?= $(OUT)/chat_pretrain_1024
+S2_SHARDS   = $(shell ls $(S2_DATA).s*.pt $(S2_CHAT).pt 2>/dev/null | paste -sd,)
+
+encode-chat-pretrain:
+	$(PY) -m prepare.chat --mix chat_pretrain \
+	    --output $(S2_CHAT) --total_tokens 250000000 --seq_length 1024
 
 s2:
 	@test -n "$(S2_SHARDS)" || { echo "没有 $(S2_DATA).s*.pt —— 先 make encode-scratch2"; exit 2; }

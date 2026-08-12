@@ -134,6 +134,20 @@ class PieceTokenizerWrapper:
             self.user_token_id = mapping.get("user_id")
             self.assistant_token_id = mapping.get("assistant_id")
             self.system_token_id = mapping.get("system_id")
+            # **81902 改作 `<end>`:回答结束的专用停止符。**
+            #
+            # 注意**词表里那个 piece 的字面名字仍然是 `<system>`** —— 改名要重建
+            # 分词器,不值得。`<end>` 是代码和文档里的名字,指的就是 81902。
+            #
+            # 对话数据里几乎没有 system 消息,而「回答结束」急需一个没有历史
+            # 包袱的 token。<eos> 在预训练里是文档分隔符(占 0.094%,S0 全程约
+            # 1100 万次),学到的含义是「一篇结束,后面还有下一篇」—— 拿它表示
+            # 「到此为止」是在跟先验打架,实测 SFT 后贪心只有 50-55% 能停下。
+            #
+            # nanochat 用专用的 <|assistant_end|>,它的 <|bos|> 只管文档边界,
+            # 两者永不混用。我们词表已满(81903)加不了新 token,所以复用 81902
+            # —— 它在预训练里出现 **0 次**,和新加一个等效。
+            self.end_token_id = self.system_token_id
         else:
             # Fallback to piece_to_id lookups
             self.bos_token_id = self._tok.piece_to_id("<s>")
@@ -142,6 +156,7 @@ class PieceTokenizerWrapper:
             self.user_token_id = self._tok.piece_to_id("<user>")
             self.assistant_token_id = self._tok.piece_to_id("<assistant>")
             self.system_token_id = self._tok.piece_to_id("<system>")
+            self.end_token_id = self.system_token_id
             if self.pad_token_id < 0:
                 self.pad_token_id = 0
 
@@ -194,7 +209,8 @@ class PieceTokenizerWrapper:
             elif msg["role"] == "assistant":
                 ids.append(self.assistant_token_id)
                 ids.extend(self._tok.encode_as_ids(msg["content"]))
-                ids.append(self.eos_token_id)
+                # **回答结束用 answer_end,不用 eos** —— 见 __init__ 里的理由。
+                ids.append(self.end_token_id)
 
         if add_generation_prompt:
             ids.append(self.assistant_token_id)
@@ -225,6 +241,8 @@ class PieceTokenizerWrapper:
             "user_id": self.user_token_id,
             "assistant_id": self.assistant_token_id,
             "system_id": self.system_token_id,
+            # 同一个 id 的第二个名字:回答结束(专用停止符,见 tokenizer.py)
+            "end_id": self.system_token_id,
         }
         with open(os.path.join(output_dir, "token_mapping.json"), "w") as f:
             json.dump(mapping, f, indent=2)

@@ -122,7 +122,21 @@ SFT_WEIGHTS = {
     "COIG_CQIA": 0.5,
 }
 
-MIXES = {"midtrain": MIDTRAIN_WEIGHTS, "sft": SFT_WEIGHTS}
+# **掺进预训练的那份。** 与 midtrain 同样的配方,但产出的 shard 直接和纯文本
+# shard 并列喂给 S2 —— 让 <user> / <assistant> 跟着 10B token 一起训,而不是
+# 等预训练结束后靠 34.8M 的 midtrain 去补。
+#
+# 实测:S0 训完 11.8B token 后这三个 token 的余弦是 **+1.0000**(完全同一个
+# 向量),因为预训练语料里它们出现 0 次;34.8M 的 midtrain 只把它推到 0.97。
+# 掺进预训练能给它们约 250M token 的曝光,是 midtrain 的 7 倍。
+#
+# **整段算 loss,不掩码** —— 和 midtrain 同理,这一步是让模型见熟格式,不是精调
+# 答案。所以产出的 shard 格式与纯文本完全一致(int32 [N, seq_len],无 mask 文件),
+# 训练时直接并进 --train_data 的逗号列表。
+CHAT_PRETRAIN_WEIGHTS = dict(MIDTRAIN_WEIGHTS)
+
+MIXES = {"midtrain": MIDTRAIN_WEIGHTS, "sft": SFT_WEIGHTS,
+         "chat_pretrain": CHAT_PRETRAIN_WEIGHTS}
 
 
 # ------------------------------------------------------------------ 读取
@@ -231,7 +245,10 @@ def encode_turns(tok, turns, seq_len):
         if system_content:
             s = tok.encode(system_content, add_special_tokens=False)
             ids.extend(s); mask.extend([0] * len(s))
-            ids.append(tok.system_token_id); mask.append(0)
+            # system 段用 <assistant> 之外的分隔已无可用 token(81902 已改作
+        # 回答结束),而对话数据里几乎没有 system 消息 —— 直接把系统内容并进
+        # 第一条用户消息,不引入新标记。
+        ids.append(tok.user_token_id); mask.append(0)
 
     sys_content = turns[0][1] if turns and turns[0][0] == "system" else None
     body = turns[1:] if sys_content else turns
@@ -252,7 +269,11 @@ def encode_turns(tok, turns, seq_len):
                 b2 = tok.encode(body[i + 1][1], add_special_tokens=False)
                 turn_ids.append(tok.assistant_token_id); turn_mask.append(0)
                 turn_ids.extend(b2); turn_mask.extend([1] * len(b2))
-                turn_ids.append(tok.eos_token_id); turn_mask.append(1)
+                # **专用的回答结束符,不是 <eos>。** <eos> 在预训练里是文档
+                # 分隔符(0.094%,S0 全程约 1100 万次),学到的含义是「后面还有
+                # 下一篇」;拿它表示「到此为止」是在跟先验打架。
+                # nanochat 用专用的 <|assistant_end|>,同理。见 DATA_FORMAT.md。
+                turn_ids.append(tok.end_token_id); turn_mask.append(1)
                 i += 2
             else:
                 i += 1
@@ -376,8 +397,8 @@ def main() -> int:
             if len(segs) > 1:
                 split += 1
             for ids, mask in segs:
-                if a.mix == "midtrain":
-                    mask = [1] * len(ids)  # midtrain 整段算 loss
+                if a.mix in ("midtrain", "chat_pretrain"):
+                    mask = [1] * len(ids)  # 整段算 loss:教格式,不精调答案
                 pool.append((ids, mask))
                 got += len(ids)
             # 池子攒够了就 best-fit 打包一批,不用等全部读完(那要占几个 G 内存)
