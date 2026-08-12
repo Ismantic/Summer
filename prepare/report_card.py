@@ -34,6 +34,10 @@ RESULTS = os.path.join(ROOT, "eval_results", "nanochat")
 
 # nanochat d20 的公开成绩(speedrun 档,SFT 之后;base 只公开了 CORE 0.2219)。
 # 出处:https://github.com/karpathy/nanochat/discussions/1
+# **注意:口径未必一致。** nanochat 用自己的 harness,这几个数是 acc 还是
+# acc_norm 没有公开说明。实测 Qwen3-0.6B-Base 上两者能差 0.07(arc_easy
+# acc 0.6549 / acc_norm 0.5816,arc_challenge 反过来 0.3345 / 0.3823)——
+# 也就是说光靠一个数字对不上号。所以这一列只当**量级参考**,不做精确比较。
 NANOCHAT_D20 = {
     "arc_easy": 0.3876,
     "arc_challenge": 0.2807,
@@ -48,14 +52,11 @@ NANOCHAT_D20 = {
 # 基线,读者会以为模型「学到了一点」——实际上那是噪声。
 TASKS = [
     ("arc_easy",       "ARC-Easy",   "acc,none",            0.25),
+    ("arc_easy",       "  ↳ acc_norm", "acc_norm,none",      0.25),
     ("arc_challenge",  "ARC-Chall",  "acc,none",            0.25),
+    ("arc_challenge",  "  ↳ acc_norm", "acc_norm,none",      0.25),
     ("mmlu",           "MMLU",       "acc,none",            0.25),
-    ("hellaswag",      "HellaSwag",  "acc,none",            0.25),
-    ("winogrande",     "Winogrande", "acc,none",            0.50),
-    ("boolq",          "BoolQ",      "acc,none",            0.50),
-    ("openbookqa",     "OpenBookQA", "acc,none",            0.25),
     ("gsm8k",          "GSM8K",      "exact_match,strict-match", 0.0),
-    ("humaneval",      "HumanEval",  "pass@1,create_test",  0.0),
     ("ceval-valid",    "C-Eval(中)", "acc,none",            0.25),
 ]
 
@@ -113,7 +114,7 @@ def main() -> int:
     print(hdr)
     print("-" * len(hdr))
     for task, name, metric, rnd in TASKS:
-        nc = NANOCHAT_D20.get(task)
+        nc = None if name.startswith("  ↳") else NANOCHAT_D20.get(task)
         row = f"{name:<12}{rnd:>7.2f}{(f'{nc:.4f}' if nc else '—'):>8}"
         for t in tags:
             v = pick(data[t].get(task, {}), metric)

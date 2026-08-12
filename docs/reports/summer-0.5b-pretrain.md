@@ -75,6 +75,54 @@ hyp: Or will the restaurant be ready in a few days?   ← 基本译对
 **S0 → S1 是整条线里最大的单步变化**(COMET 0.4638 → 0.6855)。让 ICL 出现的
 不是参数量也不是总 token 数,是那 30% 平行语料。
 
+## 通用能力(nanochat 口径的五项)
+
+对照有两列:**Qwen3-0.6B-Base 是关键那一列** —— 同尺寸、36T token、已知能力,
+它量的是「同样大小的模型,预训练充分是什么样」。nanochat d20(560M / 约 11B
+token)那一列只当量级参考,原因见下。
+
+| | 随机 | nanochat d20 | Qwen3-0.6B-Base | Summer-0.5B-S0 |
+|---|---|---|---|---|
+| ARC-Easy (acc) | 0.25 | 0.3876 | 0.6549 | 0.5564 |
+| ARC-Easy (acc_norm) | 0.25 | — | 0.5816 | 0.4949 |
+| ARC-Challenge (acc) | 0.25 | 0.2807 | 0.3345 | 0.2466 |
+| ARC-Challenge (acc_norm) | 0.25 | — | 0.3823 | 0.2671 |
+| MMLU | 0.25 | 0.3151 | 0.5041 | 0.2520 |
+| GSM8K (8-shot) | 0 | 0.0455 | — | 0.0121 |
+| C-Eval(中文) | 0.25 | — | — | 0.2363 |
+
+对 Qwen3-0.6B-Base 的差:ARC-Easy −0.099、ARC-Challenge −0.088、**MMLU −0.252**。
+
+**MMLU 那个 −0.252 是最诚实的数。** 同样 0.5B 的模型,预训练充分的有 0.5041
+的知识面,我们就是随机(0.2520)。ARC 上差不到 0.1 —— 基础语言理解学到了一些;
+MMLU 上完全没有 —— 13B token 装不下知识。这就是 36T 对 13B 的代价。
+
+C-Eval 0.2363 略低于随机属噪声。GSM8K 0.0121 在 8-shot 下,基本是零。
+
+### nanochat 那一列不能精确比
+
+一开始我把 ARC-Easy 的 0.5564 当成「超过 nanochat 的 0.3876」,**那是错的**。
+
+`acc` 和 `acc_norm` 是两个指标,而 nanochat 报的是哪个没有公开说明。实测在
+Qwen3-0.6B-Base 上两者能差 0.07,且方向不一致:
+
+```
+                acc      acc_norm
+arc_easy       0.6549    0.5816    ← acc 更高(选项短,未归一化偏向短选项)
+arc_challenge  0.3345    0.3823    ← 反过来
+```
+
+光凭一个数字对不上号。所以那一列只当量级参考。另外我们走
+`prepare/benchmark.py`(绑 piece 分词器),Qwen 走 lm_eval 自带的 vllm 后端 ——
+**严格说这也是混后端**(`WHY.md` 第二节记过实测差 2.2 个点),所以上面那些差值
+也该当量级看,不当精确值。
+
+### 不实现 CORE
+
+nanochat 的 base 报 CORE(DCLM 那 22 个任务的中心化准确率),其中若干个 lm_eval
+没有等价配置(bigbench 的几个子任务、jeopardy、coqa 的切分)。凑一个「近似
+CORE」会得到看着能比、其实不可比的数,比没有更糟。
+
 ## 走完下游之后
 
 同一条 SFT → CPO → GRPO(与两个 1.7B 底座 31 项超参完全一致)之后:
