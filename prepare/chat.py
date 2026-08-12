@@ -364,15 +364,14 @@ def main() -> int:
 
         pool: list[tuple[list[int], list[int]]] = []
 
-        def pack_stream(items):     # 目前没有调用方,见下面的说明
-            """**预训练用:连续流,不 padding。** 当前未启用。
+        def pack_stream(items):
+            """**midtrain 用:连续流、切满、不 padding。**
 
-            留着是因为「掺对话进预训练」这个选项还可能回来 —— 那时对话数据要按
-            预训练规则打包(连续流),而不是 SFT 规则(补 pad)。走错了的后果是
-            5.6% 的 <pad> 被当成正常 token 训练(预训练不传 --loss_mask)。
+            对齐 nanochat 的 `scripts/mid_train.py` —— 它用 deque 缓冲把对话首尾
+            相接,凑够 `device_batch_size * max_seq_len + 1` 就切一批,和它预训练
+            的 dataloader 同款。**一条对话可能被切断在中间**,那是有意的。
 
-            与 SFT 的 pack() 相反 —— nanochat 也是按阶段分开的:预训练截断填满
-            (文档用不完,算力宝贵),SFT 补 pad(数据稀缺,一条不能丢)。
+            与 SFT 的 pack() 相反,理由见 do_pack。
             """
             nonlocal buf_i, buf_m
             for ii, mm in items:
@@ -382,6 +381,24 @@ def main() -> int:
                     all_mask.append(np.asarray(buf_m[:seq_len], dtype=np.uint8))
                     del buf_i[:seq_len], buf_m[:seq_len]
             items.clear()
+
+        def do_pack(items, final=False):
+            """**按阶段选打包方式,这是 nanochat 分开处理的地方。**
+
+            midtrain 走 pack_stream(连续流、切满、无 padding),SFT 走 pack
+            (best-fit、补 pad)。理由是它自己在两处写清楚的:midtrain 阶段
+            数据管够,算力才宝贵,所以截断填满;SFT 阶段数据稀缺,一条都不能丢,
+            所以宁可浪费算力补 pad。
+
+            **早先两个阶段都用了 best-fit,那是错的。** 我把 SFT 的做法误推广
+            到了 midtrain,代价是 5.4% 的算力在训尾部 padding。nanochat 的
+            mid_train.py 用的是 deque 连续流缓冲(和它预训练的 dataloader 同款),
+            grep 不到任何 mask —— 整段算 loss、也不留 pad。
+            """
+            if a.mix in ("midtrain", "chat_pretrain"):
+                pack_stream(items)
+                return
+            pack(items, final=final)
 
         def pack(items, final=False):
             """**best-fit**:每行反复挑「最大的还装得下的」,装不下才 pad。
@@ -447,13 +464,13 @@ def main() -> int:
                     mask = [1] * len(ids)  # 整段算 loss:教格式,不精调答案
                 pool.append((ids, mask))
                 got += len(ids)
-            # 池子攒够了就 best-fit 打包一批,不用等全部读完(那要占几个 G 内存)
+            # 池子攒够了就打包一批,不用等全部读完(那要占几个 G 内存)
             if len(pool) >= 4000:
-                pack(pool)
+                do_pack(pool)
             if got >= want:
                 break
         if pool:                       # 收尾:池子里剩下的也打包掉
-            pack(pool, final=True)
+            do_pack(pool, final=True)
         actual[name] = got
         print(f"  {name:16s} 实得 {got:,} token"
               f"(切成多段 {split:,} 条,整条丢弃 {dropped:,} 条)")

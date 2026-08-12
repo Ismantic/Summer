@@ -415,8 +415,14 @@ midtrain:
 # 只在助手回复上算 loss(--loss_mask,监督比例 88.3%)—— 用户那段不算,否则模型
 # 会去学「怎么生成问题」,那不是要的能力,还会稀释真正的监督信号。
 #
-# lr 比 midtrain 再低一档:数据更少(12M)、目标更精细,大步长会把 midtrain 学到的
-# 格式冲散。
+# **lr 取 midtrain 的 2%,对齐 nanochat 的 init_lr_frac。** 它 midtrain 跑
+# init_lr_frac=1.0(全速)、SFT 跑 0.02,差 50 倍;我们原来只差 4 倍(5e-4/2e-3),
+# 高了一个数量级。怀疑这正是 SFT 把 ARC-Easy 从 0.5564 打到 0.4941 的原因 ——
+# 步子太大,把 midtrain 学到的东西冲掉了。
+#
+# **含义是格式和题型要在 midtrain 学完,SFT 只做轻微收尾。** nanochat 就是这么
+# 分工的:midtrain 全速学格式,SFT 用 2% 的步长精调答案质量。<end> 也一样 ——
+# midtrain 数据里每条回答都以它结尾,不必等到 SFT 才学。
 SFT_DATA   ?= $(OUT)/sft_1024
 SFT_OUT    ?= $(OUT)/summer05b_sft
 SFT_FROM   ?= $(OUT)/summer05b_mid
@@ -435,7 +441,7 @@ sft-chat:
 	    --param_dtype float32 --ce_chunk 4096 \
 	    --max_steps $(SFT_STEPS) --warmup_steps 30 \
 	    --lr_schedule cosine --min_lr_ratio 0.1 \
-	    --muon_lr 5e-4 --adam_lr 3e-5 \
+	    --muon_lr 4e-5 --adam_lr 2e-6 \
 	    --max_grad_norm 1.0 --seed 42 --num_workers 0 \
 	    --save_steps 150 --logging_steps 20 --keep_ckpt 2
 
