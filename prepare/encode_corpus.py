@@ -399,9 +399,28 @@ def pack_bos_bestfit(docs, seq_len, bos, buffer_size=1000, stats=None):
     文档末尾放 <eos>。两套不能混,混了 <bos> 和 <eos> 的含义都会含糊。
 
     `docs` 是产出 token 列表的可迭代对象;逐行 yield 长度恰好 seq_len 的 list。
-    `stats` 给个 dict 进来的话,会往里累加 `in_tokens` / `dropped`,
-    **用来核对丢弃率** —— 它自述约 35%,差太多说明文档长度分布和它不一样,
-    那是个该知道的事实,不该默默吃掉。
+    `stats` 给个 dict 进来的话,会往里累加 `in_tokens` / `dropped`。
+
+    ## 实测的丢弃率(scratch mix,310M token 那次跑满的)
+
+    ```
+    Gutenberg        84.0%   ← 书太长,几乎整本被裁掉
+    CN_FineWeb_Edu   50.1%      Wikipedia_EN   37.3%      CC_CN      28.4%
+    Wikipedia_CN     42.0%      FineWebEdu     35.5%      SkyPile    26.6%
+    CCI3-HQ          41.5%      CC_EN          29.1%      Cosmopedia 26.0%
+    全部源合计 48.0%(400M / 834M)
+    ```
+
+    FineWebEdu 的 35.5% 和 nanochat 自述的 35% 精确吻合 —— 那是它主要的语料,
+    所以实现是对的。**我们整体更高(48%),因为语料里有长文档源** ——
+    Gutenberg 是整本书,best-fit 一行 1025 装不下,只能反复裁,84% 白扔。
+
+    > **小规模跑动会把这个率严重低估,别拿小样本读它。** 我第一次用 20M token
+    > 量出 3.2%~17%,据此写下「我们浪费得比它少,是好消息」—— 错的。原因是
+    > best-fit **优先消费装得下的短文档,长文档在缓冲区里堆积**;跑动提早结束时
+    > 那批长文档还没被裁,分母算了它们、分子没算。跑满之后率就升到真实值。
+
+    `stats` 的用处就是让这件事可见 —— 丢弃率是**语料属性**,不是常数。
     """
     buf: list[list[int]] = []
     it = iter(docs)
