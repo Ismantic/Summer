@@ -20,6 +20,7 @@ Summer-0.5B 的 chat 线:**midtrain → SFT**。每一版改了什么、量到�
 | v2 | 专用 `<end>`;best-fit;midtrain 103M | 65.0%※ / 65% | 0.3899 | 0.9575 | 0.4941 |
 | v3 | + 中文多选(C3);**同时**SFT lr 降到 2% | 43.0%† | 0.4657 | 0.9588 | — |
 | v4 | midtrain 打包改连续流(单变量) | **67.0%**† | **0.7834** | 0.9592 | — |
+| v5 | A 组六项 + 验证集 | 在跑 | | | |
 | nanochat d20 | — | **95%**※ | — | 0.9996 | — |
 
 ※ 教师强制探针 / 旧的 20 条 prompt,和 † 那两个不是一个判据,见 v2 那节。
@@ -236,7 +237,41 @@ SFT 那一侧仍然在用 best-fit,而我们并不知道该不该一起改。
 
 ## 还差什么:对齐清单
 
-### A 组 —— 纯配置,一次重跑能验(待做)
+### 先说一件影响路线的事:nanochat 上游已经不做两阶段了
+
+`1ddaad1`(2026-01-31)commit message 是「nuke midtraining from orbit,
+it's not as needed now that we have a BOS-aligned dataloader」。但**不是删掉,
+是合并** —— 新 `chat_sft.py` 的混比就是旧 `mid_train.py` 的混比(SmolTalk 460K
++ 身份对话 ×2 + MMLU-aux ×3 + GSM8K ×4 + 拼写 200K/80K),`mid_train.py` 少了
+386 行,`chat_sft.py` 多了约 300 行。
+
+关键是学习率跟着改了:
+
+```
+旧(两阶段)   midtrain init_lr_frac 1.0  →  SFT init_lr_frac 0.02   差 50 倍
+新(单阶段)   一个 SFT,init_lr_frac 0.8   (embedding_lr 也从 0.2 提到 0.3)
+```
+
+**旧版那个 0.02 只在「前面有个全速 midtrain 打好底」的前提下成立。**
+
+对我们的三点含义:
+
+1. **不用改现在的路线。** 我们对照的 d20 产于这次重构之前(`aa530cd^` 里
+   `mid_train.py` 还在),它就是两阶段训出来的 —— 95% 那个对照和我们的
+   midtrain → SFT 同类可比,A 组把 SFT 定在 2% 也是对的。
+2. **C 组里「预训练每行以 BOS 开头」价值被我低估了。** 上游认为它足以顶掉
+   整个 midtrain 阶段(`43c29dd`「Big DataLoader refactor: BOS-aligned
+   dataloaders」)。重做预训练时这是便宜且影响大的一项。
+3. **但我们有个量到过的理由不能照着合并**:特殊 token 的余弦从 1.0000 分化到
+   0.9625 **只发生在 midtrain**,SFT 推不动(`<assistant>` 落在 mask=0 的
+   prefix 里,拿不到输出侧梯度)。要合并就必须同时把 lr 提到 0.8 那个量级,
+   照旧版的 2% 合并等于特殊 token 永远学不会。
+
+它还顺带加了真正的验证集:`SmolTalk(split="test")` + `MMLU(split="test")`,
+是**held-out split**,比我们「留出打包后的尾部行」干净 —— 我们那个尾部行和
+训练行同源同分布,只能防训崩,防不了「配方选错了」。
+
+### A 组 —— 纯配置(已实现,v5 在验)
 
 | | nanochat | 我们 |
 |---|---|---|
@@ -285,7 +320,9 @@ unembedding    0.004 × 0.775 = 0.0031  1e-4      31×
 | RMSNorm | 它**没有可学权重**,我们有(Qwen3 架构自带) |
 | `<user_end>` | 它有,我们没有 —— 加要重建词表,会破坏所有已发布模型 |
 | seq_len | 2048 vs 我们 1024 |
-| 预训练每行以 BOS 开头 | 它保证,我们不保证 |
+| 预训练每行以 BOS 开头 | 它保证,我们不保证。**上游认为这一项足以顶掉整个 midtrain 阶段**,见上面那节 |
+| 两阶段 vs 单阶段 | 它现在是一个 SFT(init_lr_frac 0.8),我们是 midtrain(1.0)+ SFT(0.02) |
+| 验证集 | 它用 SmolTalk / MMLU 的 **test split**,我们只能留出同分布的尾部行 |
 
 ### 判据层面的缺口
 
@@ -340,3 +377,35 @@ tiktoken,顶层 import 用空壳模块绕过即可。
 
 协议实现要**先在已知答案上校验**:拿 d20 跑我们的 `mc_eval.py` 打分逻辑得
 0.3994,它 meta 里是 0.4033,差 -0.0039,才敢用。
+
+---
+
+## v5:A 组六项 + 验证集(进行中)
+
+六项改动见上面 A 组那张表。**这一版是打包了六项的跑动** —— 今天刚记下「一个
+commit 两个改动会毁掉归因」,所以说清楚:A 组的目标不是搞清哪一项有效,是
+**消除所有偏离**。退步了就得 bisect,六项都做成了 Makefile 变量,置空即可:
+
+```
+make midtrain NANOCHAT_OPT=          # 只留调度
+make midtrain MID_SCHED="--warmup_steps 50 --lr_schedule cosine --min_lr_ratio 0.1"
+```
+
+**除了六项,还有一项不得不带上**:验证集留出尾部 512 行,于是训练可用 96,999 行
+(v4 是 97,511),1573 步 × 64 = 100,672 行走 **1.038 epoch**(v4 是 1.032)。
+0.5% 的差,记下来,不是零。
+
+开跑后确认六项都真的生效(这类开关改错了不报错):
+
+```
+[val] 留出尾部 512 行做验证,训练用前 96,999 行
+AdamW lr × (d_model/768)^-0.5 = ×0.8660 → 8.660e-05
+Muon params: 440,401,920 (wd=0.0) | Adam params: 83,934,208 (wd=0.0, betas=(0.8, 0.95))
+step 20/1573 | lr [0.002000, 0.000087] | mom 0.8563      ← 0.85 + 19/300×0.10
+```
+
+`mom` 是特意加进日志的:`src/optim.py` 每步从 group 里读
+`beta=group["momentum"]`,所以逐步改是生效的,但**改错了不会报错**。
+打的是 `step-1`,那才是这一步真正用的值。
+
+判据和 v4 完全一致:同一批 200 条 prompt、同一个 `--render ours`。
