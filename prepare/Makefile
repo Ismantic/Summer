@@ -214,8 +214,16 @@ SCRATCH_SHARDS = $(shell ls $(OUT)/scratch_1024.s*.pt 2>/dev/null | paste -sd,)
 
 .PHONY: init-scratch encode-scratch s0 s0-resume
 
+# 缩小架构做流程预演:INIT_DEPTH=10 → 10L/640H/114M(hidden = depth×64)。
+# 空 = 原尺寸(28L/1024H/524M)。**小模型只验链路,不定配方** ——
+# 词表 81903 固定,depth 10 的嵌入占 46% 而 0.5B 占 16%,不是同一种模型。
+INIT_DEPTH ?=
+# 训练中途的 BLEU 评测钩子。预演时置空(`S0_EVAL_HOOK=`),省掉每次存档后的评测。
+S0_EVAL_HOOK ?= --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S0)/bleu_curve.jsonl'
+
 init-scratch:
-	$(PY) $(HERE)init_scratch.py --output_path $(INIT_S)
+	$(PY) $(HERE)init_scratch.py --output_path $(INIT_S) \
+	    $(if $(INIT_DEPTH),--depth $(INIT_DEPTH),)
 
 encode-scratch:
 	$(PY) $(HERE)encode_corpus.py --mix scratch \

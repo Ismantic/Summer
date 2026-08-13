@@ -372,9 +372,89 @@ def _iter_text_plain(fmt, files, field):
                     yield txt
 
 
+def pack_bos_bestfit(docs, seq_len, bos, buffer_size=1000, stats=None):
+    """**BOS 对齐 + best-fit 裁剪**,逐算法对齐 nanochat 的
+    `dataloader.py:tokenizing_distributed_data_loader_with_state_bos_bestfit`。
+
+    它自己 docstring 里写明的三条性质:
+
+    1. **每行以 BOS 开头** —— 行首永远是文档边界,绝不从半截文档开始
+    2. **100% 利用率,没有 padding** —— 每个 token 都参与训练
+    3. **约 35% 的 token 因裁剪被丢弃** —— 这是明码标价的代价,不是 bug
+
+    算法(每一行):
+      从缓冲区反复挑「**最大的**能整条装下的」文档;
+      一个都装不下时,取**最短的**那篇裁到刚好填满,尾巴丢弃。
+
+    ## 和我们原来那套连续流的区别
+
+    连续流是把文档首尾相接再按 seq_len 切,于是**一行可能从半截文档开始** ——
+    那种上下文推理时不会出现。上游认为修掉这一点之后 midtrain 阶段就不必要了
+    (commit 1ddaad1),所以这不是小改动。
+
+    ## 不放 <eos>,只前置 <bos>
+
+    nanochat 是 `tokenizer.encode(docs, prepend=bos_token)`,**文档末尾不加
+    任何东西** —— BOS 自己就是分隔符。我们原来的连续流反过来:不放 BOS、
+    文档末尾放 <eos>。两套不能混,混了 <bos> 和 <eos> 的含义都会含糊。
+
+    `docs` 是产出 token 列表的可迭代对象;逐行 yield 长度恰好 seq_len 的 list。
+    `stats` 给个 dict 进来的话,会往里累加 `in_tokens` / `dropped`,
+    **用来核对丢弃率** —— 它自述约 35%,差太多说明文档长度分布和它不一样,
+    那是个该知道的事实,不该默默吃掉。
+    """
+    buf: list[list[int]] = []
+    it = iter(docs)
+    exhausted = False
+    while True:
+        while not exhausted and len(buf) < buffer_size:
+            try:
+                d = [bos] + next(it)
+            except StopIteration:
+                exhausted = True
+            else:
+                buf.append(d)
+                if stats is not None:
+                    stats["in_tokens"] = stats.get("in_tokens", 0) + len(d)
+        if not buf:
+            return
+        row: list[int] = []
+        while len(row) < seq_len:
+            remaining = seq_len - len(row)
+            # 最大的能整条装下的
+            best_i, best_len = -1, 0
+            for i, d in enumerate(buf):
+                n = len(d)
+                if n <= remaining and n > best_len:
+                    best_i, best_len = i, n
+            if best_i >= 0:
+                row.extend(buf.pop(best_i))
+            else:
+                if not buf:
+                    return            # 缓冲区空了,最后不足一行的丢掉(不补 pad)
+                # 一个都装不下:取**最短的**裁到刚好填满,尾巴丢弃
+                sh = min(range(len(buf)), key=lambda i: len(buf[i]))
+                d = buf.pop(sh)
+                row.extend(d[:remaining])
+                if stats is not None:
+                    stats["dropped"] = stats.get("dropped", 0) + len(d) - remaining
+            # 边填边补:缓冲区见底就续,否则 best-fit 的选择面会越来越小
+            while not exhausted and len(buf) < buffer_size:
+                try:
+                    d2 = [bos] + next(it)
+                except StopIteration:
+                    exhausted = True
+                else:
+                    buf.append(d2)
+                    if stats is not None:
+                        stats["in_tokens"] = stats.get("in_tokens", 0) + len(d2)
+        assert len(row) == seq_len, f"打包出了 {len(row)} 长的行,应为 {seq_len}"
+        yield row
+
+
 def worker_process_shard(args):
     (src_name, fmt, field, files, target_tokens, seq_len, max_line_chars,
-     tok_model, cn_dict, out_path, shard_idx) = args
+     tok_model, cn_dict, out_path, shard_idx, pack) = args
     import piece_tokenizer as pt
     tok = pt.Tokenizer()
     # 位置参数,不用关键字 —— 上游 commit 20d55e0 把这个参数从 `cn_dict` 改名成
@@ -395,25 +475,47 @@ def worker_process_shard(args):
     n_docs, last_log = 0, 0
     t0 = time.time()
     label = f"{src_name}#{shard_idx}"
-    # 每个 shard 用不同的种子,模板抽样才不会 52 份全一样;换机器重跑仍相同。
-    for text in iter_text(fmt, files, field, seed=1000 + shard_idx):
-        if len(text) > max_line_chars:
-            text = text[:max_line_chars]
-        buf.extend(tok.encode_as_ids(text))
-        buf.append(eos)
-        n_docs += 1
-        while len(buf) >= seq_len and n_filled < target_chunks:
-            out[n_filled] = buf[:seq_len]
-            del buf[:seq_len]
-            n_filled += 1
-        if n_filled >= target_chunks:
-            break
-        if n_docs - last_log >= 50000:
-            elapsed = time.time() - t0
-            print(f"  [{label}] {n_filled:,}/{target_chunks:,} chunks "
-                  f"| {n_docs:,} docs | {elapsed:.0f}s", flush=True)
-            last_log = n_docs
 
+    def docs():
+        """产出每篇文档的 token 列表。**不加 <eos>** —— bos_bestfit 用 BOS 分隔。"""
+        nonlocal n_docs, last_log
+        # 每个 shard 用不同的种子,模板抽样才不会 52 份全一样;换机器重跑仍相同。
+        for text in iter_text(fmt, files, field, seed=1000 + shard_idx):
+            if len(text) > max_line_chars:
+                text = text[:max_line_chars]
+            n_docs += 1
+            if n_docs - last_log >= 50000:
+                print(f"  [{label}] {n_filled:,}/{target_chunks:,} chunks "
+                      f"| {n_docs:,} docs | {time.time() - t0:.0f}s", flush=True)
+                last_log = n_docs
+            yield tok.encode_as_ids(text)
+
+    if pack == "bos_bestfit":
+        bos = tok.piece_to_id("<s>")
+        if bos < 0:
+            raise RuntimeError(f"词表里没有 <s>(BOS):{tok_model}")
+        pk_stats: dict = {}
+        for row in pack_bos_bestfit(docs(), seq_len, bos, stats=pk_stats):
+            out[n_filled] = row
+            n_filled += 1
+            if n_filled >= target_chunks:
+                break
+    else:
+        # 原来那套:连续流,文档末尾放 <eos>,不放 BOS。**S0 是用它训的。**
+        for ids in docs():
+            buf.extend(ids)
+            buf.append(eos)
+            while len(buf) >= seq_len and n_filled < target_chunks:
+                out[n_filled] = buf[:seq_len]
+                del buf[:seq_len]
+                n_filled += 1
+            if n_filled >= target_chunks:
+                break
+
+    if pack == "bos_bestfit" and pk_stats.get("in_tokens"):
+        d = pk_stats.get("dropped", 0)
+        print(f"  [{label}] bos_bestfit 丢弃 {d:,}/{pk_stats['in_tokens']:,} = "
+              f"{d / pk_stats['in_tokens']:.1%}(nanochat 自述约 35%)", flush=True)
     arr = out[:n_filled]
     np.save(out_path, arr)
     elapsed = time.time() - t0
@@ -423,7 +525,7 @@ def worker_process_shard(args):
 
 
 def build_shards(weights, total_tokens, n_workers, tmpdir, seq_len, max_line_chars,
-                 tok_model, cn_dict, max_tokens_per_shard=0):
+                 tok_model, cn_dict, max_tokens_per_shard=0, pack="stream"):
     # 每个 worker 预分配 `target_chunks × seq_len` 的 int32 数组,并发跑
     # n_workers 个 —— 所以单份的上限直接决定峰值内存。1B token 的活儿按
     # 12 个 worker 平分是 4GB/份 × 12 = 48GB,本机 61GB 会被压死;
@@ -452,7 +554,7 @@ def build_shards(weights, total_tokens, n_workers, tmpdir, seq_len, max_line_cha
             out_path = os.path.join(tmpdir, f"{src_name}_s{idx}.npy")
             tasks.append((src_name, defn.fmt, defn.text_field, fset,
                           per_shard_target, seq_len, max_line_chars,
-                          tok_model, cn_dict, out_path, idx))
+                          tok_model, cn_dict, out_path, idx, pack))
         print(f"  {src_name:18s} w={w:.3f} files={len(files):4d} "
               f"shards={n_shards} target_per_shard={per_shard_target/1e6:.0f}M tokens")
     return tasks
@@ -474,6 +576,10 @@ def main():
     p.add_argument("--output", required=True)
     p.add_argument("--total_tokens", type=int, required=True)
     p.add_argument("--seq_length", type=int, default=1024)
+    p.add_argument("--pack", choices=["stream", "bos_bestfit"], default="stream",
+                   help="stream=连续流+文档末尾 <eos>(**S0 是用它训的**);"
+                        "bos_bestfit=每行以 BOS 开头 + best-fit 裁剪,逐算法对齐 "
+                        "nanochat 的预训练 dataloader。**两套不能混**")
     p.add_argument("--max_line_chars", type=int, default=100_000)
     p.add_argument("--seed", type=int, default=42)
     # 默认跟着 CPU 核数走,不写死。
@@ -512,7 +618,7 @@ def main():
     tasks = build_shards(weights, args.total_tokens, args.num_workers, tmpdir,
                          args.seq_length, args.max_line_chars,
                          args.tokenizer_model, args.cn_dict,
-                         args.max_tokens_per_shard)
+                         args.max_tokens_per_shard, args.pack)
     print(f"Total shards: {len(tasks)}")
     tasks.sort(key=lambda t: -t[4])
 
