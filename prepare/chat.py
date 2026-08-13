@@ -188,6 +188,7 @@ def SFT_TASKS():
 # 中文才 0.78 —— 再加 3 倍英文多选只会把这个差距拉得更开,而不是补短板。
 # 真正该做的是补中文多选的量,那是数据问题。
 def CHAT_TASKS():
+    from prepare.tasks.arc import ARC
     from prepare.tasks.c3 import C3
     from prepare.tasks.coig_cqia import COIGCQIA
     from prepare.tasks.gsm8k import GSM8K
@@ -198,7 +199,8 @@ def CHAT_TASKS():
     from prepare.tasks.zh_instruct import AlpacaGPT4ZH, FireflyZH, MagpieZH
     return [
         SmolTalk(stop=100000),         # 偏离:它用全量 460K,见上面的账
-        MMLUAux(),                     # 偏离:它 ×3,我们 ×1,理由见上
+        *[MMLUAux() for _ in range(3)],  # ×3,照抄 --mmlu-epochs(补中文供给后负担得起)
+        ARC("ARC-Easy"), ARC("ARC-Challenge"),  # **d20 的 SFT 里有 ARC train**
         *[GSM8K() for _ in range(4)],  # ×4,照抄 --gsm8k-epochs
         Identity(1000), Identity(1000),
         SimpleSpelling(200000),
@@ -225,7 +227,7 @@ def CHAT_TASKS():
         # **配到对半的理由**:预训练语料本身是中英 50:50(`SCRATCH_WEIGHTS`),
         # 后训练偏到一边会浪费底座的一半;而且 v4/v5 唯一成功的那个阶段就是对半。
         MagpieZH(),                    # 中文侧的 SmolTalk:自合成对话,答案偏长
-        FireflyZH(stop=250000),        # 广度:15 种任务类型,答案偏短
+        FireflyZH(stop=35000),         # 广度:15 种任务类型,答案偏短
         AlpacaGPT4ZH(),
         COIGCQIA(),                    # 保留 —— 知乎长答那类,别的源没有
         C3(),                          # zh 多选题型,对应 MMLU_AuxTrain
