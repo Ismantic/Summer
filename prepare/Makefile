@@ -390,6 +390,12 @@ MID_FROM    ?= $(OUT)/summer05b_s0
 MID_STEPS   ?= 532
 MID_BATCH   ?= 16
 MID_ACCUM   ?= 4
+# 额外参数透传,默认空。主要用途是断点续训:
+#   MID_EXTRA="--resume_from output/summer05b_mid4/checkpoint-1400"
+# 24GB 卡上 batch 16 的峰值是 23.1G / 24.5G,只剩 1.4G 余量,**碎片化就会 OOM**
+# (v4 在 step 1520 挂过一次,报错里 3.94G 是 reserved 但用不上的)。所以跑长任务
+# 建议带上 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True。
+MID_EXTRA   ?=
 
 midtrain:
 	$(PY) $(ROOT)/src/train.py \
@@ -404,7 +410,7 @@ midtrain:
 	    --lr_schedule cosine --min_lr_ratio 0.1 \
 	    --muon_lr 2e-3 --adam_lr 1e-4 \
 	    --max_grad_norm 1.0 --seed 42 --num_workers 0 \
-	    --save_steps 200 --logging_steps 20 --keep_ckpt 3
+	    --save_steps 200 --logging_steps 20 --keep_ckpt 3 $(MID_EXTRA)
 
 # SFT:**从 midtrain 的产物起,不是从 S0 起。**
 #
