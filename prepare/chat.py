@@ -44,7 +44,6 @@ SFT:只在助手回复 + 其后的 eos 上算 loss。用户那段不算 —— �
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import random
@@ -54,84 +53,78 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data import source as _source                              # noqa: E402
 from prepare.tokenizer import (PieceTokenizerWrapper,           # noqa: E402
                                resolve_assets)
 
 # ------------------------------------------------------------------ 配比
 #
-# 参照 nanochat 的 midtrain:对话为主,掺一点多选题和数学。
+# 混比 = **一个任务实例的列表**,每个数据集一个类,放在 `prepare/tasks/`。
+# 对齐 nanochat 的 `TaskMixture` —— **同一个任务传两次就是两个 epoch**。
 #
-# 多选题那份不是为了"学知识",是为了**让模型见过「四个选项选一个」这种题型**
-# —— 否则 MMLU / ARC / C-Eval 评测时连输出格式都不会,分数低到无法反映真实能力。
+# ## 为什么从 token 权重改成按行数
 #
-# 中英对半:底座是中英 50:50 训出来的,只喂英文会浪费掉一半能力。
-# **配比受制于中文侧的供给。** 实测各源本地可出的 token:
+# 原来按 token 权重分配,坑是**权重是上限不是保证**:C3 规划 0.10(10.6M)实得
+# 只有 2.4M,因为全量就 11869 条、抽干了,缺口被 SmolTalk 顶上 —— 而账面上
+# 看不出来,`planned_weights` 写着 0.10,你得去翻 `actual_tokens` 才发现。
+# 按行数写就没有这回事:要多少条就是多少条,数据不够会直接少。
 #
-#   SmolTalk(en)      90.2M(本地 1/4 分片,全量约 360M)
-#   COIG_CQIA(zh)      6.5M  ← **这个数是错的,见下**
-#   MMLU_AuxTrain      26.6M
-#   GSM8K_Train         1.3M
+# ## 中文侧是我们多出来的那一半
 #
-# 中文对话料比英文少一个量级。硬凑 50:50 就得把中文重复十几遍,那会在中文上
-# 过拟合 —— 而这种偏斜在 loss 曲线上看不出来。所以这一版**按中文侧的实际供给
-# 定总量**(约 35M),而不是先定总量再配比。
+# 对齐目标是**两阶段**那一版(`aa530cd^` 的 mid_train.py + chat_sft.py),
+# 不是上游现在合并后的单阶段 —— 我们对照的 d20 就是两阶段训出来的。
 #
-# 中英不是严格 50:50:多选题(MMLU)和数学(GSM8K)本身是英文的,它们进来是为了
-# 教**题型**,不是教英文。纯对话那部分 SmolTalk : COIG_CQIA = 1 : 1。
+# **逐条照搬会删掉中文。** nanochat 是纯英文的;Summer = nanochat + 中文 + ReTok,
+# 所以中文侧配对应的源:COIG-CQIA 对 SmolTalk,C3 对 MMLU_AuxTrain。
+# 汉字不是字母拼的,所以拼写那两个任务没有中文对应物,是纯英文的。
 #
-# ## 那个 6.5M 是幸存者偏差,真实是约 50M
+# ## seq_len 仍是 1024,这是已知限制
 #
-# 估算时我用「encode_turns 返回的 token 总数 ÷ 条数」当平均长度,但这个函数
-# **超长的会返回空**,于是分母算了全部、分子只算了留下来的短样本 —— 越丢越显得
-# 平均短,估出 145 token/条。
-#
-# 实测 COIG-CQIA 的真实分布:**中位数 1126 token**,p90 2093,p99 2459。
-# seq_len 1024 下只有 50% 能整条装下,另一半按「单轮超长」被整条丢掉 ——
-# 而切段策略对它无效:它是单轮长回答(考试题解析、知乎长答),切段只在多轮之间
-# 切,单轮切不了。
-#
-# 所以中文侧的实际供给是约 50M 而不是 6.5M,上面这个配比的前提不成立。
-# **当前这份 midtrain 数据仍然可用**(34.8M、配比精确、掩码正确,中文那 6.65M
-# 是真实完整样本,只是偏短的那一半),先拿它跑通链路;要不要重编等验证完再定。
-# ## 决定:保持 seq_len 1024,不修
-#
-# 实测不同长度下 COIG-CQIA 能保住的量:
-#
-#   1024   66.0% 样本 →  9M token
-#   1536   81.8%       → 18M
-#   2048   92.5%       → 26M
-#
+# COIG-CQIA 的回答很长(中位 1126 token),1024 下只有 66% 能整条装下。
 # 2048 能把中文提到近 3 倍,但**预训练全程只见过 1024**,位置 1024-2048 的 RoPE
-# 从没被训过 —— 用 2048 做 SFT 等于让模型在 12M token 里同时学「答得好」和
-# 「长位置怎么编码」,正是刚在特殊 token 上吃过的亏(新东西训不透)。
-#
-# 而且瓶颈不在这里:对 Qwen3-0.6B-Base 的 MMLU 差 0.24,是预训练 13B token 的
-# 问题,不是 SFT 数据量的问题。为了把中文从 9M 提到 26M 去冒位置编码训不透的
-# 风险,收益和风险不匹配。**这是已知限制,不是待修的 bug。**
-# **中文多选是补上去的,原因是实测出来的洞。** 之前 midtrain 里的多选题全是
-# 英文(MMLU_AuxTrain),中文那半(COIG_CQIA)是知乎长答和考试解析,一条选择题
-# 都没有 —— 于是「看到选项就答字母」只在英文语境里学会了。实测格式跟随
-# (不加约束、全词表 argmax、首选是不是候选字母):英文 0.96-0.99,中文 0.3899。
-# 中文那个数没修之前,C-Eval 的分数分不出「不会做题」和「没听懂要答字母」。
-MIDTRAIN_WEIGHTS = {
-    "SmolTalk": 0.19,          # en 对话  ≈ 6.5M,与中文侧对齐
-    "COIG_CQIA": 0.19,         # zh 对话  ≈ 6.5M,全量
-    "MMLU_AuxTrain": 0.48,     # en 多选题型  实得 35.2M
-    # **实际只拿到 2.4M,不是 0.10 对应的 10.6M** —— C3 全量就 11869 条,
-    # 抽干了。规划权重是上限不是保证,缺口被 SmolTalk 顶上(实得 47.5M)。
-    # 所以中文多选实占 2.4%,而英文多选占 35.2%,相差 15 倍。够不够是待验的:
-    # 模型在英文里已经把「看到选项→答字母」学到 0.99,中文缺的是触发,不是
-    # 从零学这个行为。不够的话下一个候选是 ChID(成语选填,CLUE,train 很大)。
-    "C3_Train": 0.10,          # zh 多选题型  实得 2.4M(见上)
-    "GSM8K_Train": 0.04,       # 数学/分步推理 ≈ 1.3M,全量
-}
+# 从没被训过 —— 用 2048 做后训练等于让模型顺便学「长位置怎么编码」,
+# 正是在特殊 token 上吃过的亏。**这是已知限制,不是待修的 bug。**
+def MIDTRAIN_TASKS():
+    from prepare.tasks.c3 import C3
+    from prepare.tasks.coig_cqia import COIGCQIA
+    from prepare.tasks.gsm8k import GSM8K
+    from prepare.tasks.identity import Identity
+    from prepare.tasks.mmlu import MMLUAux
+    from prepare.tasks.smoltalk import SmolTalk
+    from prepare.tasks.spelling import SimpleSpelling, SpellingBee
+    return [
+        SmolTalk(),                    # en 通用对话  nanochat: 460K 行
+        MMLUAux(),                     # en 多选题型  nanochat: 100K 行
+        GSM8K(),                       # 数学/分步推理  nanochat: 8K 行
+        Identity(1000), Identity(1000),  # 身份 ×2 个 epoch,和 nanochat 一样
+        SimpleSpelling(200000),        # 拼写  nanochat: 200K 行
+        SpellingBee(80000),            # 数字母  nanochat: 80K 行
+        # ---- 以下是 nanochat 没有的中文侧 ----
+        COIGCQIA(),                    # zh 通用对话,对应 SmolTalk
+        C3(),                          # zh 多选题型,对应 MMLU_AuxTrain
+    ]
 
-# SFT 只用对话,不掺题型 —— 题型该在 midtrain 学完。中英仍对半。
-SFT_WEIGHTS = {
-    "SmolTalk": 0.5,
-    "COIG_CQIA": 0.5,
-}
+
+# SFT:nanochat 的 23K 行 —— **和 midtrain 是不同的配方**,以短答案题型为主
+# (ARC + GSM8K),SmolTalk 只取前 1 万条。
+def SFT_TASKS():
+    from prepare.tasks.arc import ARC
+    from prepare.tasks.c3 import C3
+    from prepare.tasks.coig_cqia import COIGCQIA
+    from prepare.tasks.gsm8k import GSM8K
+    from prepare.tasks.identity import Identity
+    from prepare.tasks.smoltalk import SmolTalk
+    from prepare.tasks.spelling import SimpleSpelling, SpellingBee
+    return [
+        ARC("ARC-Easy"),               # nanochat: 2.3K 行
+        ARC("ARC-Challenge"),          # nanochat: 1.1K 行
+        GSM8K(),                       # nanochat: 8K 行
+        SmolTalk(stop=10000),          # nanochat: 前 10K 行
+        Identity(1000),                # nanochat: 1K 行
+        SimpleSpelling(300), SpellingBee(300),
+        # ---- 中文侧,按 en 的比例配 ----
+        COIGCQIA(stop=10000),          # 对应 SmolTalk 那 10K
+        C3(stop=3400),                 # 对应 ARC 的 2.3K+1.1K
+    ]
 
 # **掺进预训练的那份。** 与 midtrain 同样的配方,但产出的 shard 直接和纯文本
 # shard 并列喂给 S2 —— 让 <user> / <assistant> 跟着 10B token 一起训,而不是
@@ -144,102 +137,8 @@ SFT_WEIGHTS = {
 # **整段算 loss,不掩码** —— 和 midtrain 同理,这一步是让模型见熟格式,不是精调
 # 答案。所以产出的 shard 格式与纯文本完全一致(int32 [N, seq_len],无 mask 文件),
 # 训练时直接并进 --train_data 的逗号列表。
-CHAT_PRETRAIN_WEIGHTS = dict(MIDTRAIN_WEIGHTS)
-
-MIXES = {"midtrain": MIDTRAIN_WEIGHTS, "sft": SFT_WEIGHTS,
-         "chat_pretrain": CHAT_PRETRAIN_WEIGHTS}
-
-
-# ------------------------------------------------------------------ 读取
-def _files(name: str) -> list[str]:
-    src = _source.get(name)
-    pats = src.allow_patterns or [src.part_glob]
-    out: list[str] = []
-    for p in pats:
-        out.extend(sorted(glob.glob(str(src.dir() / p))))
-    if not out:
-        raise FileNotFoundError(
-            f"{name} 没有本地文件({src.dir()} / {pats})。"
-            f"先 `make -C data probe {name}` 或 `python data/download.py {name}`。")
-    return out
-
-
-def iter_turns(name: str):
-    """→ [(role, content)]。**结构化的轮次**,不是拼好的纯文本 ——
-    掩码要知道边界在哪,所以不能复用 encode_corpus 里那套渲染成文本的读法。"""
-    src = _source.get(name)
-    fmt, field = src.fmt, src.text_field
-    files = _files(name)
-
-    if fmt == "jsonl_instruct":                       # COIG-CQIA
-        for path in files:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        r = json.loads(line)
-                    except Exception:                          # noqa: BLE001
-                        continue
-                    q = (r.get("instruction") or "").strip()
-                    extra = (r.get("input") or "").strip()
-                    a = (r.get("output") or "").strip()
-                    if not q or not a:
-                        continue
-                    yield [("user", f"{q}\n{extra}" if extra else q),
-                           ("assistant", a)]
-        return
-
-    import pyarrow.parquet as pq
-
-    for path in files:
-        pf = pq.ParquetFile(path)
-        # **列的选法按 fmt 分三种。** MMLU 那种是把 question/choices/answer 嵌在
-        # 一个叫 `train` 的结构体列里,只读一列就够;GSM8K 和 C3 是平铺的多列。
-        cols = {"parquet_qa": ["question", "answer"],
-                "parquet_mc_zh": ["context", "question", "choice", "answer"],
-                }.get(fmt, [field])
-        for batch in pf.iter_batches(batch_size=2000, columns=cols):
-            if fmt == "parquet_qa":                   # GSM8K
-                for q, a in zip(batch.column(0).to_pylist(),
-                                batch.column(1).to_pylist()):
-                    if q and a:
-                        yield [("user", q), ("assistant", a)]
-                continue
-            if fmt == "parquet_mc_zh":                # CLUE 的 C3,中文多选
-                for ctx, q, ch, ans in zip(*(batch.column(i).to_pylist()
-                                             for i in range(4))):
-                    # **answer 是答案原文,不是下标** —— 要反查。查不到就丢,
-                    # 不猜:猜错会教模型把正确答案和错的字母绑在一起。
-                    if not ch or ans is None or ans not in ch:
-                        continue
-                    ctx = "\n".join(ctx) if isinstance(ctx, (list, tuple)) else (ctx or "")
-                    opts = "\n".join(f"{chr(65 + i)}. {c}" for i, c in enumerate(ch))
-                    yield [("user", f"{ctx}\n{q}\n{opts}" if ctx else f"{q}\n{opts}"),
-                           ("assistant", chr(65 + list(ch).index(ans)))]
-                continue
-            for row in batch.column(0).to_pylist():
-                if row is None:
-                    continue
-                if fmt == "parquet_chat":             # SmolTalk
-                    t = [(m.get("role", ""), m.get("content", "")) for m in row]
-                elif fmt == "parquet_chat_sharegpt":
-                    t = [({"human": "user", "gpt": "assistant"}.get(
-                              m.get("from", ""), m.get("from", "")),
-                          m.get("value", "")) for m in row]
-                elif fmt == "parquet_mc":             # MMLU auxiliary_train
-                    ch = row.get("choices") or []
-                    if not ch or row.get("answer") is None:
-                        continue
-                    opts = "\n".join(f"{chr(65 + i)}. {c}" for i, c in enumerate(ch))
-                    t = [("user", f"{row.get('question', '')}\n{opts}"),
-                         ("assistant", chr(65 + int(row["answer"])))]
-                else:
-                    raise ValueError(f"{name}: 不认识的 fmt={fmt}")
-                t = [(r, c) for r, c in t if r in ("system", "user", "assistant") and c]
-                if len(t) >= 2:
-                    yield t
+MIXES = {"midtrain": MIDTRAIN_TASKS, "sft": SFT_TASKS,
+         "chat_pretrain": MIDTRAIN_TASKS}
 
 
 # ------------------------------------------------------------------ 编码
@@ -342,21 +241,23 @@ def main() -> int:
     piece = a.tokenizer_model or resolve_assets()[0]
     tok = PieceTokenizerWrapper(os.path.dirname(os.path.abspath(str(piece))))
 
-    weights = MIXES[a.mix]
+    tasks = MIXES[a.mix]()
     rng = random.Random(a.seed)
     seq_len = a.seq_length
-    budget = {k: int(a.total_tokens * w) for k, w in weights.items()}
-    print(f"[chat] mix={a.mix}  目标 {a.total_tokens:,} token  seq_len={seq_len}")
-    for k, v in budget.items():
-        print(f"  {k:16s} {v:,}")
+    print(f"[chat] mix={a.mix}  seq_len={seq_len}  {len(tasks)} 个任务")
+    print(f"  **按行数混,不按 token 权重** —— 有多少条就是多少条,不做上限裁剪")
+    if a.total_tokens:
+        print(f"  --total_tokens {a.total_tokens:,} 被忽略(按行数混之后它没有意义)")
 
     # 每个源单独打包 —— 混在一起打包会让某个源的对话被别的源截断,
     # 而且 shuffle 之后配比对不上账。
     all_ids: list[np.ndarray] = []
     all_mask: list[np.ndarray] = []
-    actual = {}
+    actual: dict[str, int] = {}
+    rows_seen: dict[str, int] = {}
     padded = 0
-    for name, want in budget.items():
+    for task in tasks:
+        name = task.name
         buf_i: list[int] = []
         buf_m: list[int] = []
         got = dropped = split = 0
@@ -438,21 +339,9 @@ def main() -> int:
             all_ids.append(np.asarray(row_i + [pad_id] * n_pad, dtype=np.int32))
             all_mask.append(np.asarray(row_m + [0] * n_pad, dtype=np.uint8))
 
-        def flush():
-            """把 buf 里剩下的补成一条完整序列。**长度必须恰好 seq_len** ——
-            差一个都会让 np.stack 报 shape 不一致。"""
-            nonlocal buf_i, buf_m, padded
-            if not buf_i:
-                return
-            if len(buf_i) > seq_len:      # 早炸,别等到 np.stack
-                raise AssertionError(
-                    f"打包出了长度 {len(buf_i)} 的序列,超过 seq_len={seq_len}")
-            n_pad = seq_len - len(buf_i)
-            padded += n_pad
-            all_ids.append(np.asarray(buf_i + [pad_id] * n_pad, dtype=np.int32))
-            all_mask.append(np.asarray(buf_m + [0] * n_pad, dtype=np.uint8))
-            buf_i, buf_m = [], []
-        for turns in iter_turns(name):
+        rows = 0
+        for turns in task:
+            rows += 1
             segs = encode_turns(tok, turns, seq_len)
             if not segs:
                 dropped += 1
@@ -467,13 +356,16 @@ def main() -> int:
             # 池子攒够了就打包一批,不用等全部读完(那要占几个 G 内存)
             if len(pool) >= 4000:
                 do_pack(pool)
-            if got >= want:
-                break
         if pool:                       # 收尾:池子里剩下的也打包掉
             do_pack(pool, final=True)
-        actual[name] = got
-        print(f"  {name:16s} 实得 {got:,} token"
-              f"(切成多段 {split:,} 条,整条丢弃 {dropped:,} 条)")
+        # **连续流不足一行的尾巴直接丢**,不补 pad —— nanochat 的 deque 也是这样。
+        # 补了就破坏「零填充、100% 被监督」那个性质,而那正是 v4 的收益来源。
+        # 每个任务最多丢 seq_len-1 个 token。
+        # **同一个任务可能出现多次(= 多个 epoch),要累加不能覆盖。**
+        actual[name] = actual.get(name, 0) + got
+        rows_seen[name] = rows_seen.get(name, 0) + rows
+        print(f"  {name:20s} {rows:>7,} 条 → {got:>12,} token"
+              f"(切成多段 {split:,},整条丢弃 {dropped:,})")
 
     if not all_ids:
         print("!! 一条都没编出来"); return 1
@@ -490,7 +382,11 @@ def main() -> int:
     ratio = msk.sum() / msk.size
     meta = {"mix": a.mix, "seq_length": seq_len, "chunks": int(arr.shape[0]),
             "total_tokens": int(arr.size), "supervised_ratio": float(ratio),
-            "planned_weights": weights, "actual_tokens": actual}
+            # **不再有 planned_weights** —— 按行数混就没有「规划 vs 实得」的落差
+            # 这回事了。`tasks` 记的是混比本身(同一个名字出现两次 = 两个 epoch),
+            # `rows` 和 `actual_tokens` 记实得。
+            "tasks": [repr(t) for t in tasks],
+            "rows": rows_seen, "actual_tokens": actual}
     with open(a.output + ".mix.json", "w") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"\n写出 {arr.shape[0]:,} 条 × {seq_len} = {arr.size:,} token")

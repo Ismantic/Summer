@@ -71,31 +71,18 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 
-def render_mc(question: str, letters: list[str], choices: list[str]) -> str:
-    """逐字对齐 nanochat 的 `tasks/common.py:render_mc`。**不要「改进」它** ——
-    换了格式就不能和它的数比了,那这套评测就白写。"""
-    query = f"Multiple Choice question: {question}\n"
-    query += "".join(f"- {choice}={letter}\n" for letter, choice in zip(letters, choices))
-    query += "\nRespond only with the letter of the correct answer."
-    return query
+# **渲染函数在 `prepare/tasks/common.py`,不在这里。** 训练和评测必须用同一份 ——
+# 各写一份的话,改了训练侧忘了改评测侧,量到的就是「换了提示格式认不认得」,
+# 而不是「会不会做题」,**而且两边都不会报错**。
+#
+#   nanochat  `Multiple Choice question: …\n- {选项}={字母}\n\nRespond only with…`
+#   ours      `{问题}\n{A. 选项}`  —— v2~v5 的 midtrain 是用这个训的
+#
+# v6 起训练侧统一改用 nanochat 的渲染(对齐基准),所以 **v6 之后的数要用
+# `--render nanochat` 读**;v2~v5 的数要用 `--render ours`。两者不可比。
+from prepare.tasks.common import render_mc, render_mc_ours       # noqa: E402
 
-
-def render_ours(question: str, letters: list[str], choices: list[str]) -> str:
-    """**我们自己 midtrain 时用的渲染**,逐行对齐 `prepare/chat.py` 的 parquet_mc。
-
-    为什么需要这个:midtrain 混比里 MMLU_AuxTrain 占 0.58(约 60M token),全部
-    用这个格式训的。拿 nanochat 的格式去考,量到的是「换了提示格式还认不认得」,
-    分不出「不会做选择题」和「训的是另一套格式」—— 两者该做的事完全不同。
-
-    **和 nanochat 的差别有四处**:没有 "Multiple Choice question:" 前缀、字母在
-    选项**之前**、分隔符是 ". " 不是 "="、没有那句 "Respond only with..."。
-    nanochat 的注释特意说明字母放在选项之后是为了小模型的绑定更好。
-    """
-    opts = "\n".join(f"{letter}. {choice}" for letter, choice in zip(letters, choices))
-    return f"{question}\n{opts}"
-
-
-RENDERERS = {"nanochat": render_mc, "ours": render_ours}
+RENDERERS = {"nanochat": render_mc, "ours": render_mc_ours}
 
 
 # task → (加载函数, 说明)。每个返回 [(question, letters, choices, answer_letter)]

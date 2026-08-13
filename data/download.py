@@ -143,6 +143,22 @@ def download_one(src: source.Source, workers: int, dry: bool) -> bool:
     endpoint = source.HF_ENDPOINT or None
     rtype = _repo_type(src)
 
+    if src.kind == "url":
+        # 普通 URL,不走 HF。给拼写任务的英文词表用 —— 那份表不在 HF 上。
+        # **repo_id 存 URL,part_glob 存落地文件名。**
+        import urllib.request
+        target = dest / src.part_glob
+        if target.exists():
+            print(f"  已有 {target}")
+            return True
+        print(f"  下载 {src.repo_id} → {target}")
+        if not dry:
+            dest.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(target.suffix + ".part")
+            urllib.request.urlretrieve(src.repo_id, tmp)
+            tmp.rename(target)          # 下完才改名,断了不会留半个文件冒充成品
+        return True
+
     if src.kind == "hf-snapshot":
         print(f"  整仓下载 {src.repo_id} → {dest}")
         if not dry:

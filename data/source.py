@@ -318,6 +318,39 @@ CHAT_SOURCES = {
              "数学/工具使用那一份,以及最后 RL 阶段的题库。**只取 train**,"
              "test 是 gsm8k 评测集(make bench 里那项)。",
     ),
+    # ---- 对齐 nanochat 的 SFT 混比而补的三个源 -----------------------------
+    # 它的 SFT 里有 ARC-Easy 2.3K + ARC-Challenge 1.1K,我们原来两个阶段都没有。
+    # **取的是 train split,和 mc_eval 用的 test split 不重叠。** 但要记住:
+    # 训了 train 之后,ARC 的成绩里有一部分是同分布的格式训练,不能全当知识。
+    "ARC_Easy_Train": Source(
+        name="ARC_Easy_Train", kind="hf", repo_id="allenai/ai2_arc",
+        subdir="ARC-Easy", part_glob="ARC-Easy/train-*.parquet", n_parts=None,
+        allow_patterns=["ARC-Easy/train-*.parquet"], lang="en",
+        fmt="parquet_arc", text_field="question",
+        note="ARC-Easy 的 **train** split,2.3K 条科学常识多选。"
+             "对齐 nanochat 的 SFT 混比(`chat_sft.py`)。",
+    ),
+    "ARC_Challenge_Train": Source(
+        name="ARC_Challenge_Train", kind="hf", repo_id="allenai/ai2_arc",
+        subdir="ARC-Challenge", part_glob="ARC-Challenge/train-*.parquet",
+        n_parts=None, allow_patterns=["ARC-Challenge/train-*.parquet"], lang="en",
+        fmt="parquet_arc", text_field="question",
+        note="ARC-Challenge 的 **train** split,1.1K 条。同上。",
+    ),
+    # 拼写任务的词表。**kind=\"url\"**:这份表不在 HF 上,repo_id 存 URL、
+    # part_glob 存落地文件名。分词器把词切成 piece,模型看不见字母 ——
+    # 「strawberry 里有几个 r」不是知识问题是表示问题,得明确教。
+    "EnglishWords": Source(
+        name="EnglishWords", kind="url",
+        repo_id="https://raw.githubusercontent.com/dwyl/english-words/"
+                "refs/heads/master/words_alpha.txt",
+        subdir="english_words", part_glob="words_alpha.txt", n_parts=None,
+        allow_patterns=None, lang="en", fmt="txt_wordlist", text_field="",
+        note="370K 英文单词表,给 SimpleSpelling / SpellingBee 用。"
+             "和 nanochat 用的是**同一份**(`tasks/spellingbee.py:37`)。"
+             "只有英文 —— 汉字不是字母拼的,不做类比。",
+    ),
+
     "C3_Train": Source(
         name="C3_Train", kind="hf", repo_id="clue/clue",
         subdir="c3", part_glob="c3/train-*.parquet", n_parts=None,
