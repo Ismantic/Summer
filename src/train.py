@@ -154,7 +154,21 @@ def collate_fn(batch, pad_token_id):
     return dict(input_ids=input_ids, labels=labels, attention_mask=attention_mask)
 
 
-def build_optimizer(model, muon_lr, adam_lr, muon_momentum, weight_decay, use_aurora=False, moonshot_scaling=False):
+def build_optimizer(model, muon_lr, adam_lr, muon_momentum, weight_decay, use_aurora=False, moonshot_scaling=False,
+                    adam_betas=(0.9, 0.95), adam_weight_decay=None, dmodel_lr_scale=False):
+    """**后三个参数默认保持原行为。**
+
+    它们是为了对齐 nanochat 加的(见 `docs/POSTTRAIN.md` 的 A 组),但
+    `src/train.py` 同时在跑预训练和 ReTok 两条线,而那两条线**已经发布了权重**。
+    直接改硬编码等于悄悄换掉它们的配方,**而且不会报错** —— 所以做成开关,
+    由 Makefile 的 midtrain / sft-chat 两个 target 显式打开。
+
+    - `adam_betas`:nanochat 用 (0.8, 0.95),我们原来是 (0.9, 0.95)
+    - `adam_weight_decay`:nanochat 的 AdamW 组 wd 硬编码 0,wd 只给 Muon。
+      None = 沿用 `weight_decay`(原行为)
+    - `dmodel_lr_scale`:nanochat 把 AdamW 的 lr 乘 (d_model/768)^-0.5。
+      d_model=1024 时是 0.866
+    """
     muon_params = []
     adam_params = []
     for name, param in model.named_parameters():
@@ -170,18 +184,24 @@ def build_optimizer(model, muon_lr, adam_lr, muon_momentum, weight_decay, use_au
     rule = "Aurora" if use_aurora else "Muon"
     if moonshot_scaling:
         rule = f"{rule}+MoonshotLR"
-    print(f"{rule} params: {muon_count:,} | Adam params: {adam_count:,}  (wd={weight_decay})", flush=True)
+    adam_wd = weight_decay if adam_weight_decay is None else adam_weight_decay
+    if dmodel_lr_scale:
+        scale = (model.config.hidden_size / 768) ** -0.5
+        adam_lr = adam_lr * scale
+        print(f"AdamW lr × (d_model/768)^-0.5 = ×{scale:.4f} → {adam_lr:.3e}", flush=True)
+    print(f"{rule} params: {muon_count:,} (wd={weight_decay}) | "
+          f"Adam params: {adam_count:,} (wd={adam_wd}, betas={adam_betas})", flush=True)
 
     if muon_params:
         param_groups = [
             dict(params=muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay, use_muon=True),
-            dict(params=adam_params, lr=adam_lr, betas=(0.9, 0.95), eps=1e-10, weight_decay=weight_decay, use_muon=False),
+            dict(params=adam_params, lr=adam_lr, betas=adam_betas, eps=1e-10, weight_decay=adam_wd, use_muon=False),
         ]
         update_fn = aurora_update if use_aurora else None
         return SingleDeviceMuonWithAuxAdam(param_groups, update_fn=update_fn, moonshot_scaling=moonshot_scaling)
     else:
         # No Muon params (e.g. freeze_transformer), use plain Adam
-        return torch.optim.AdamW(adam_params, lr=adam_lr, betas=(0.9, 0.95), eps=1e-10, weight_decay=weight_decay)
+        return torch.optim.AdamW(adam_params, lr=adam_lr, betas=adam_betas, eps=1e-10, weight_decay=adam_wd)
 
 
 def train(args):
@@ -333,6 +353,25 @@ def train(args):
             f"  src/ 不碰文本 —— 分词属于 prepare/ 那一层。")
     dataset = PreTokenizedDataset(args.train_data, args.loss_mask)
 
+    # **验证集 = 留出尾部 N 行。**
+    #
+    # 不用重新编码:`prepare/chat.py` 是**全局 shuffle 之后才写盘**的,所以尾部
+    # 那些行天然跨数据源分层,不会全来自同一个源。
+    #
+    # **它防的是训崩和过拟合,不是后训练的主判据。** v4 的实测:打包方式一改,
+    # 中文停止率 +40 点、格式跟随 +32 点,而 loss 侧完全看不出改进(数据难度
+    # 解释了全部差值)。拿 val loss 选 checkpoint 会把那一版判成平手。
+    # 详见 docs/POSTTRAIN.md。
+    n_train = len(dataset) - max(0, args.val_rows)
+    if args.val_rows > 0:
+        if n_train <= 0:
+            raise ValueError(f"--val_rows {args.val_rows} 不小于总行数 {len(dataset)}")
+        val_idx = list(range(n_train, len(dataset)))
+        print(f"[val] 留出尾部 {len(val_idx):,} 行做验证,训练用前 {n_train:,} 行",
+              flush=True)
+    else:
+        val_idx = []
+
     sampler = None
     if is_distributed:
         sampler = torch.utils.data.distributed.DistributedSampler(
@@ -348,7 +387,8 @@ def train(args):
     # 自己按 (seed, epoch) 生成排列,续训时切片跳过即可,轨迹与不中断完全一致。
     def epoch_order(epoch: int) -> list[int]:
         g = torch.Generator().manual_seed(args.seed * 1000003 + epoch)
-        return torch.randperm(len(dataset), generator=g).tolist()
+        # 只在前 n_train 行里排列 —— 尾部留给验证,绝不能进训练
+        return torch.randperm(n_train, generator=g).tolist()
 
     def make_loader(epoch: int, consumed: int):
         order = None if sampler is not None else epoch_order(epoch)[consumed:]
@@ -361,9 +401,44 @@ def train(args):
             collate_fn=lambda batch: collate_fn(batch, pad_token_id),
         )
 
+    @torch.no_grad()
+    def eval_val() -> float:
+        """验证集 loss。**sum / 有效 token 总数**,不是「每 batch 的均值再平均」——
+        各行被监督的 token 数不一样,后者会给短行更大权重。"""
+        model.eval()
+        total, n_valid = 0.0, 0
+        for i in range(0, len(val_idx), args.batch_size):
+            rows = [dataset[j] for j in val_idx[i:i + args.batch_size]]
+            b = collate_fn(rows, pad_token_id)
+            ids = b["input_ids"].to(device)
+            lab = b["labels"].to(device)
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                logits = model(ids)
+            tgt = lab[:, 1:].reshape(-1)
+            total += torch.nn.functional.cross_entropy(
+                logits[:, :-1].reshape(-1, logits.size(-1)).float(), tgt,
+                ignore_index=IGNORE_INDEX, reduction="sum").item()
+            n_valid += int((tgt != IGNORE_INDEX).sum())
+        model.train()
+        return total / max(n_valid, 1)
+
     # Optimizer (build on raw model so param names don't have DDP "module." prefix)
     optimizer = build_optimizer(raw_model, args.muon_lr, args.adam_lr, args.muon_momentum, args.weight_decay,
-                                use_aurora=args.use_aurora, moonshot_scaling=args.moonshot_scaling)
+                                use_aurora=args.use_aurora, moonshot_scaling=args.moonshot_scaling,
+                                adam_betas=(args.adam_beta1, args.adam_beta2),
+                                adam_weight_decay=args.adam_weight_decay,
+                                dmodel_lr_scale=args.dmodel_lr_scale)
+
+    # **Muon 动量的预热。** nanochat 前 300 步把 momentum 从 0.85 拉到 0.95
+    # (`base_train.py` 的 `get_muon_momentum`)。理由是刚开始梯度方向变化快,
+    # 高动量会拖着走错方向;Muon 还要对动量缓冲做 Newton-Schulz 正交化,更敏感。
+    # `--muon_momentum_warmup 0` 关掉,保持原行为(恒定 `--muon_momentum`)。
+    def muon_momentum_at(step: int) -> float:
+        w = args.muon_momentum_warmup
+        if w <= 0:
+            return args.muon_momentum
+        f = min(1.0, step / w)
+        return args.muon_momentum_start + f * (args.muon_momentum - args.muon_momentum_start)
 
     # LR scheduler: linear warmup, then decay to min_lr_ratio*peak floor.
     # Default schedule is cosine (Llama/Qwen standard); linear available for back-compat.
@@ -407,6 +482,7 @@ def train(args):
     # accum,所以和就是均值),以及它的 EMA。
     step_loss_sum = 0.0
     loss_ema: float | None = None
+    best_val: float | None = None
     epoch, consumed = 0, 0
     t0 = time.time()
     interrupted = False
@@ -561,6 +637,11 @@ def train(args):
             if micro_step % args.gradient_accumulation_steps == 0:
                 if args.max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                if args.muon_momentum_warmup > 0:
+                    m = muon_momentum_at(step)
+                    for g in optimizer.param_groups:
+                        if g.get("use_muon"):
+                            g["momentum"] = m
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
@@ -580,9 +661,24 @@ def train(args):
                 if step % args.logging_steps == 0:
                     elapsed = time.time() - t0
                     lrs = [f"{g['lr']:.6f}" for g in optimizer.param_groups]
+                    # 动量在预热期内要**打出来** —— `src/optim.py` 每步从 group 里
+                    # 读 `beta=group["momentum"]`,所以逐步改是生效的;但改错了
+                    # 不会报错,所以让它可见。
+                    mom = ""
+                    if args.muon_momentum_warmup > 0 and step <= args.muon_momentum_warmup + 1:
+                        # `step` 此时已自增,而动量是在自增**前**取的 —— 打 step-1
+                        # 才是这一步真正用的值(第一步是 muon_momentum_start)
+                        mom = f" | mom {muon_momentum_at(step - 1):.4f}"
                     log(f"step {step}/{args.max_steps} | loss {step_loss:.4f} | "
                         f"ema {loss_ema:.4f} | "
-                        f"lr [{', '.join(lrs)}] | {elapsed:.1f}s")
+                        f"lr [{', '.join(lrs)}]{mom} | {elapsed:.1f}s")
+
+                if val_idx and args.eval_steps > 0 and step % args.eval_steps == 0:
+                    vl = eval_val()
+                    best_val = vl if best_val is None else min(best_val, vl)
+                    log(f"step {step}/{args.max_steps} | **val loss {vl:.4f}** | "
+                        f"最优 {best_val:.4f}"
+                        + ("  ← 新低" if vl == best_val else ""))
 
                 if args.save_steps > 0 and step % args.save_steps == 0:
                     if is_main:
@@ -667,9 +763,31 @@ if __name__ == "__main__":
                         help="Path to JSON list of token IDs to freeze (one-to-one mapped tokens)")
     parser.add_argument("--max_steps", type=int, default=100)
     parser.add_argument("--warmup_steps", type=int, default=5)
+    parser.add_argument("--val_rows", type=int, default=0,
+                        help="留出**尾部**多少行做验证(0=不留)。chat.py 是全局 "
+                             "shuffle 后才写盘的,所以尾部天然跨数据源分层")
+    parser.add_argument("--eval_steps", type=int, default=0,
+                        help="每多少步测一次验证 loss。0=不测。nanochat 用 150")
     parser.add_argument("--muon_lr", type=float, default=0.001)
     parser.add_argument("--adam_lr", type=float, default=1e-4)
     parser.add_argument("--muon_momentum", type=float, default=0.95)
+    # 下面五个是为了对齐 nanochat(docs/POSTTRAIN.md 的 A 组)。
+    # **默认值一律保持原行为** —— 预训练和 ReTok 两条线也在用这个脚本,
+    # 而它们已经发布了权重,改默认等于悄悄换掉它们的配方。
+    parser.add_argument("--muon_momentum_warmup", type=int, default=0,
+                        help="Muon 动量从 --muon_momentum_start 线性拉到 "
+                             "--muon_momentum 的步数。0=关(恒定)。nanochat 用 300")
+    parser.add_argument("--muon_momentum_start", type=float, default=0.85,
+                        help="动量预热的起点,只在 --muon_momentum_warmup > 0 时生效")
+    parser.add_argument("--adam_beta1", type=float, default=0.9,
+                        help="nanochat 用 0.8")
+    parser.add_argument("--adam_beta2", type=float, default=0.95)
+    parser.add_argument("--adam_weight_decay", type=float, default=None,
+                        help="AdamW 组单独的 wd。不给=沿用 --weight_decay(原行为)。"
+                             "nanochat 硬编码 0,wd 只给 Muon")
+    parser.add_argument("--dmodel_lr_scale", action="store_true",
+                        help="AdamW 的 lr 乘 (d_model/768)^-0.5,对齐 nanochat。"
+                             "d_model=1024 时是 ×0.866")
     parser.add_argument("--use_aurora", action="store_true",
                         help="Use Aurora update rule (leverage-uniform polar) instead of standard Muon")
     parser.add_argument("--moonshot_scaling", action="store_true",

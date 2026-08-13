@@ -397,6 +397,36 @@ MID_ACCUM   ?= 4
 # 建议带上 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True。
 MID_EXTRA   ?=
 
+# ---- 对齐 nanochat 的后训练配方(docs/POSTTRAIN.md 的 A 组)----------------
+#
+# **这些开关在 src/train.py 里默认全关。** 那个脚本同时在跑预训练和 ReTok
+# 两条线,而那两条线**已经发布了权重** —— 改默认等于悄悄换掉它们的配方,
+# 而且不会报错。所以只在这两个 target 里显式打开。
+#
+# 想 bisect(哪一项带来了变化)就把对应的变量置空,不用改代码:
+#   make midtrain NANOCHAT_OPT=              # 只留调度
+#   make midtrain MID_SCHED="--warmup_steps 50 --lr_schedule cosine --min_lr_ratio 0.1"
+#
+# midtrain 的调度:前 80% 不衰减,后 20% 线性到 0,无 warmup。wsd 的恒定段
+# 加 min_lr_ratio 0 正好就是这个形状 —— 不用新写调度。
+MID_SCHED   ?= --warmup_steps 0 --lr_schedule wsd --min_lr_ratio 0 \
+               --lr_decay_steps $(shell echo $$(( $(MID_STEPS) / 5 )))
+# SFT 的调度:线性 1.0 → 0,无 warmup。
+SFT_SCHED   ?= --warmup_steps 0 --lr_schedule linear --min_lr_ratio 0
+# 优化器:Muon 动量前 300 步 0.85→0.95;AdamW betas (0.8,0.95);AdamW 的 wd
+# 硬编码 0(wd 只给 Muon);AdamW 的 lr × (d_model/768)^-0.5 = 0.866。
+# **wd 那一项今天是空操作** —— 我们两个阶段的 --weight_decay 本来就是 0,
+# 写上是为了以后真给 wd 时不会误伤 AdamW 组。
+NANOCHAT_OPT ?= --muon_momentum_warmup 300 --muon_momentum_start 0.85 \
+                --adam_beta1 0.8 --adam_beta2 0.95 \
+                --adam_weight_decay 0 --dmodel_lr_scale
+
+# 验证集:留出尾部若干行(chat.py 是全局 shuffle 后写盘的,尾部天然分层)。
+# **它不是后训练的主判据** —— v4 实测行为侧 +40 点而 loss 侧看不出改进。
+# 它防的是训崩和过拟合。主判据是 mc-eval 和停止率。
+VAL_ROWS    ?= 512
+EVAL_STEPS  ?= 150
+
 midtrain:
 	$(PY) $(ROOT)/src/train.py \
 	    --model_path $(MID_FROM) --train_data $(MIDTRAIN).pt \
@@ -406,9 +436,9 @@ midtrain:
 	    --gradient_accumulation_steps $(MID_ACCUM) \
 	    --gradient_checkpointing --compile \
 	    --param_dtype float32 --ce_chunk 4096 \
-	    --max_steps $(MID_STEPS) --warmup_steps 50 \
-	    --lr_schedule cosine --min_lr_ratio 0.1 \
-	    --muon_lr 2e-3 --adam_lr 1e-4 \
+	    --max_steps $(MID_STEPS) $(MID_SCHED) \
+	    --muon_lr 2e-3 --adam_lr 1e-4 $(NANOCHAT_OPT) \
+	    --val_rows $(VAL_ROWS) --eval_steps $(EVAL_STEPS) \
 	    --max_grad_norm 1.0 --seed 42 --num_workers 0 \
 	    --save_steps 200 --logging_steps 20 --keep_ckpt 3 $(MID_EXTRA)
 
@@ -435,6 +465,7 @@ SFT_FROM   ?= $(OUT)/summer05b_mid
 SFT_STEPS  ?= 366
 SFT_BATCH  ?= 16
 SFT_ACCUM  ?= 2
+SFT_EXTRA  ?=
 
 sft-chat:
 	$(PY) $(ROOT)/src/train.py \
@@ -445,11 +476,11 @@ sft-chat:
 	    --gradient_accumulation_steps $(SFT_ACCUM) \
 	    --gradient_checkpointing --compile \
 	    --param_dtype float32 --ce_chunk 4096 \
-	    --max_steps $(SFT_STEPS) --warmup_steps 30 \
-	    --lr_schedule cosine --min_lr_ratio 0.1 \
-	    --muon_lr 4e-5 --adam_lr 2e-6 \
+	    --max_steps $(SFT_STEPS) $(SFT_SCHED) \
+	    --muon_lr 4e-5 --adam_lr 2e-6 $(NANOCHAT_OPT) \
+	    --val_rows $(VAL_ROWS) --eval_steps $(EVAL_STEPS) \
 	    --max_grad_norm 1.0 --seed 42 --num_workers 0 \
-	    --save_steps 150 --logging_steps 20 --keep_ckpt 2
+	    --save_steps 150 --logging_steps 20 --keep_ckpt 2 $(SFT_EXTRA)
 
 # ---------------------------------------------------------------- S1 退火
 #
