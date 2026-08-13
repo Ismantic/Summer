@@ -195,6 +195,7 @@ def CHAT_TASKS():
     from prepare.tasks.mmlu import MMLUAux
     from prepare.tasks.smoltalk import SmolTalk
     from prepare.tasks.spelling import SimpleSpelling, SpellingBee
+    from prepare.tasks.zh_instruct import AlpacaGPT4ZH, FireflyZH, MagpieZH
     return [
         SmolTalk(stop=100000),         # 偏离:它用全量 460K,见上面的账
         MMLUAux(),                     # 偏离:它 ×3,我们 ×1,理由见上
@@ -204,24 +205,30 @@ def CHAT_TASKS():
         SpellingBee(80000),
         # ---- 中文侧,nanochat 没有 ----
         #
-        # **各 4 个 epoch,不是 1 个。** 起因是预演实测出来的:单阶段里中文只占
-        # **7.7% 的条数**,中文停止率就只有 4%(英文 61%)。
+        # **按条数配到和英文对半,而且全是唯一条目、不重复。**
         #
-        # 关键是 `<end>` 是**每条对话出现一次**的信号,所以它的行为由**条数占比**
-        # 决定,不是 token 占比。我截 SmolTalk 时只算了 token 占比(中文 6%,
-        # 看起来还行),漏了条数这一侧 —— 而英文拼写那两个任务是 280,000 条、
-        # 占全部对话的 **47%**,把 `<end>` 的分布几乎全变成「短英文答案之后」。
+        # `<end>` 是**每条对话出现一次**的信号,所以它的行为由**条数占比**决定,
+        # 不是 token 占比 —— 预演实测:中文占 7.7% 条时中文停止率只有 4%
+        # (英文 61%),提到 24.9% 就回到 31%。而 v4/v5 那个有 69~73% 的阶段
+        # (sft3)中文按条数超过 50%。
         #
-        # 对照:v4/v5 的最后一个监督阶段(sft3)是 SmolTalk 6.0M / COIG-CQIA 6.0M,
-        # 中文按条数超过 50%,中文停止率 69~73%。
+        # 之前只有 COIG(33,700 条存活)时,只能靠 ×4 重复凑占比,那是在过拟合。
+        # 补了三个源之后唯一条数约 145 万,**重复没必要了**:
         #
-        # ×4 之后中文占 182,224 / 730,534 = **25%**。
-        # **用重复而不是砍英文**:砍拼写/MMLU 会多出几处对 nanochat 的偏离,
-        # 而重复是它自己的手法(identity ×2、MMLU ×3、GSM8K ×4)。
-        # 代价是 33,700 条中文对话要过 4 遍,有过拟合风险 —— 真正的解法是补中文
-        # 指令数据把供给做到十万条量级,这里是供给不足下的权衡。
-        *[COIGCQIA() for _ in range(4)],
-        *[C3() for _ in range(4)],
+        #   Firefly(筛过 15 个 kind)  1,179,399   丢弃 1.8%   token 中位 114
+        #   Magpie                       200,000   丢弃 2.1%          441
+        #   AlpacaGPT4                    42,677   丢弃 0.0%          119
+        #   COIG(存活)                   33,700   丢弃 24.6%         215
+        #
+        # 新源在 seq 1025 下几乎不丢,正好补上 COIG 的短板(它丢掉四分之一)。
+        #
+        # **配到对半的理由**:预训练语料本身是中英 50:50(`SCRATCH_WEIGHTS`),
+        # 后训练偏到一边会浪费底座的一半;而且 v4/v5 唯一成功的那个阶段就是对半。
+        MagpieZH(),                    # 中文侧的 SmolTalk:自合成对话,答案偏长
+        FireflyZH(stop=250000),        # 广度:15 种任务类型,答案偏短
+        AlpacaGPT4ZH(),
+        COIGCQIA(),                    # 保留 —— 知乎长答那类,别的源没有
+        C3(),                          # zh 多选题型,对应 MMLU_AuxTrain
     ]
 
 

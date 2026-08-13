@@ -318,6 +318,47 @@ CHAT_SOURCES = {
              "数学/工具使用那一份,以及最后 RL 阶段的题库。**只取 train**,"
              "test 是 gsm8k 评测集(make bench 里那项)。",
     ),
+    # ---- 中文指令数据:补唯一条数 -------------------------------------------
+    #
+    # **起因是同一堵墙撞了两次。** COIG_CQIA 全量只有 44,693 条,而且因为答案长
+    # (中位 1126 token)在 seq 1025 下丢掉 24.6%,存活 33,700 条。对照 SmolTalk 的
+    # 460,341 条,差一个数量级。后果:
+    #
+    #   token 占比那一侧  照 nanochat 的行数配,中文只占 1.9%,只好把 SmolTalk 截到 10 万
+    #   条数占比那一侧    单阶段里中文占 7.7% 条,中文停止率就只有 4%(英文 61%)
+    #
+    # 预演已证实**条数占比是 `<end>` 的杠杆**(7.7%→24.9% 时中文停止率 4%→31%),
+    # 但靠重复 ×4 只到 31%、而且在冒过拟合 33,700 条的风险。**要唯一条数,不是 epoch。**
+    #
+    # 挑源的两个判据:**唯一条数多**、**答案别太长**(seq 1025 会整条丢弃超长的,
+    # COIG 就是这么丢掉四分之一的)。
+    "Firefly_ZH": Source(
+        name="Firefly_ZH", kind="hf", repo_id="YeungNLP/firefly-train-1.1M",
+        subdir="firefly_zh", part_glob="firefly-train-1.1M.jsonl", n_parts=None,
+        allow_patterns=["firefly-train-1.1M.jsonl"], lang="zh",
+        fmt="jsonl_firefly", text_field="target",
+        note="**110 万条中文指令**,23 种任务类型(问答、摘要、对联、古诗、NER…)。"
+             "字段 `kind` / `input` / `target`,单轮。答案偏短,seq 1025 下丢弃率低 —— "
+             "正是 COIG_CQIA 缺的那一面。1.17 GB 单文件。",
+    ),
+    "Magpie_ZH": Source(
+        name="Magpie_ZH", kind="hf",
+        repo_id="Magpie-Align/Magpie-Qwen2-Pro-200K-Chinese",
+        subdir="magpie_zh", part_glob="data/train-*.parquet", n_parts=None,
+        allow_patterns=["data/train-*.parquet"], lang="zh",
+        fmt="parquet_magpie", text_field="conversations",
+        note="**20 万条中文对话**,Magpie 方法自合成(用模板从强模型里引出指令再答)。"
+             "质量比 firefly 高、长度中等,和 firefly 互补 —— 相当于中文侧的 SmolTalk。",
+    ),
+    "AlpacaGPT4_ZH": Source(
+        name="AlpacaGPT4_ZH", kind="hf", repo_id="llamafactory/alpaca_gpt4_zh",
+        subdir="alpaca_gpt4_zh", part_glob="alpaca_gpt4_data_zh.json", n_parts=None,
+        allow_patterns=["alpaca_gpt4_data_zh.json"], lang="zh",
+        fmt="json_alpaca", text_field="output",
+        note="4.8 万条中文指令,alpaca 格式(instruction/input/output)。"
+             "**是一整个 JSON 数组不是 jsonl**,读法不同。小但干净,28 MB。",
+    ),
+
     # ---- 对齐 nanochat 的 SFT 混比而补的三个源 -----------------------------
     # 它的 SFT 里有 ARC-Easy 2.3K + ARC-Challenge 1.1K,我们原来两个阶段都没有。
     # **取的是 train split,和 mc_eval 用的 test split 不重叠。** 但要记住:
