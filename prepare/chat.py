@@ -164,8 +164,53 @@ def SFT_TASKS():
 # **整段算 loss,不掩码** —— 和 midtrain 同理,这一步是让模型见熟格式,不是精调
 # 答案。所以产出的 shard 格式与纯文本完全一致(int32 [N, seq_len],无 mask 文件),
 # 训练时直接并进 --train_data 的逗号列表。
+# ---------------------------------------------------------------- 设计 B
+#
+# **单阶段后训练**,对齐上游现在的 `chat_sft.py`(commit 1ddaad1 之后)。
+#
+# 两套设计不能混着抄,列清楚:
+#
+#            旧版(= d20,我们的对照)          新版(设计 B)
+#   预训练   连续流,无 BOS 对齐               **BOS + best-fit**
+#   midtrain 连续流,全速 lr,**整段算 loss**   没有
+#   SFT      best-fit,lr 2%,assistant-only   best-fit,**lr 0.8**,assistant-only
+#
+# 打包和掩码不用另写:`do_pack` 和掩码那两处的条件都是「不在 midtrain /
+# chat_pretrain 里就走 best-fit + 只算 assistant」,正好是设计 B 要的。
+#
+# ## 混比:旧 midtrain 那套,但 MMLU 不跟着加到 3 个 epoch
+#
+# 上游新版是 MMLU ×3、GSM8K ×4(`--mmlu-epochs` / `--gsm8k-epochs` 的默认值)。
+# GSM8K ×4 照抄(它小,1.2M × 4 = 4.8M);**MMLU 只放 1 个 epoch**,偏离。
+#
+# 理由和 SmolTalk 截到 10 万是同一个:MMLU_AuxTrain 是**英文**多选,×3 就是
+# 84M,而中文多选(C3)全量只有 2.1M。我们已经量到英文格式跟随 0.96 早就饱和、
+# 中文才 0.78 —— 再加 3 倍英文多选只会把这个差距拉得更开,而不是补短板。
+# 真正该做的是补中文多选的量,那是数据问题。
+def CHAT_TASKS():
+    from prepare.tasks.c3 import C3
+    from prepare.tasks.coig_cqia import COIGCQIA
+    from prepare.tasks.gsm8k import GSM8K
+    from prepare.tasks.identity import Identity
+    from prepare.tasks.mmlu import MMLUAux
+    from prepare.tasks.smoltalk import SmolTalk
+    from prepare.tasks.spelling import SimpleSpelling, SpellingBee
+    return [
+        SmolTalk(stop=100000),         # 偏离:它用全量 460K,见上面的账
+        MMLUAux(),                     # 偏离:它 ×3,我们 ×1,理由见上
+        *[GSM8K() for _ in range(4)],  # ×4,照抄 --gsm8k-epochs
+        Identity(1000), Identity(1000),
+        SimpleSpelling(200000),
+        SpellingBee(80000),
+        # ---- 中文侧,nanochat 没有 ----
+        COIGCQIA(),
+        C3(),
+    ]
+
+
 MIXES = {"midtrain": MIDTRAIN_TASKS, "sft": SFT_TASKS,
-         "chat_pretrain": MIDTRAIN_TASKS}
+         "chat_pretrain": MIDTRAIN_TASKS,
+         "chat": CHAT_TASKS}                      # 设计 B:单阶段
 
 
 # ------------------------------------------------------------------ 编码
