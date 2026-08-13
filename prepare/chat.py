@@ -77,6 +77,32 @@ from prepare.tokenizer import (PieceTokenizerWrapper,           # noqa: E402
 # 所以中文侧配对应的源:COIG-CQIA 对 SmolTalk,C3 对 MMLU_AuxTrain。
 # 汉字不是字母拼的,所以拼写那两个任务没有中文对应物,是纯英文的。
 #
+# ### 一处有意的偏离:SmolTalk 截到 10 万行(它用全量 460,341)
+#
+# 照搬全量的实测账(每条的 token 数是抽 800 条量的):
+#
+#   SmolTalk       460,341 行 × 804 = 370.2M   ← 一家占 87%
+#   MMLU_AuxTrain   99,842 行 × 281 =  28.1M
+#   SpellingBee      80,000 行 × 147 =  11.7M
+#   SimpleSpelling  200,000 行 ×  32 =   6.4M
+#   COIG_CQIA        44,694 行 × 137 =   6.1M ┐ 中文 8.3M
+#   C3_Train         11,869 行 × 179 =   2.1M ┘ = **1.9%**
+#   合计 426M
+#
+# 问题出在供给:**COIG-CQIA 全量只有 44,694 条,SmolTalk 有 460,341 条,差 10 倍。**
+# 照搬会把中文从 v5 的 15% 压到 1.9%,而 v4/v5 刚证明中文侧是最脆的一环
+# (打包方式一改,中文停止率 29% → 69%,英文几乎不动)。
+#
+# 截到 10 万之后:总量 136M、中文 6.0%、SmolTalk 占 59%。
+#
+# **这是数据供给的问题,不是混比的问题。** 真正的解法是补更大的中文指令集
+# (Infinity-Instruct 中文子集、Magpie 中文、firefly 之类),把中文侧做到十万条
+# 量级,那时候才能真按 nanochat 的行数对齐。在那之前这个 10 万是权衡。
+#
+# 顺带一个比 A 组更大的差距:**我们原来的 midtrain 只有 100M,对齐后 136M,
+# 而全量对齐是 426M。** 按比例算 nanochat 是约 400M/11B = 3.6%,我们 13B 底座
+# 对应该有 470M —— 一直偏小了 4 倍多。
+#
 # ## seq_len 仍是 1024,这是已知限制
 #
 # COIG-CQIA 的回答很长(中位 1126 token),1024 下只有 66% 能整条装下。
@@ -92,15 +118,16 @@ def MIDTRAIN_TASKS():
     from prepare.tasks.smoltalk import SmolTalk
     from prepare.tasks.spelling import SimpleSpelling, SpellingBee
     return [
-        SmolTalk(),                    # en 通用对话  nanochat: 460K 行
-        MMLUAux(),                     # en 多选题型  nanochat: 100K 行
-        GSM8K(),                       # 数学/分步推理  nanochat: 8K 行
+        # **这里偏离 nanochat:它用全量 460,341 行,我们截到 10 万。** 理由见下。
+        SmolTalk(stop=100000),         # en 通用对话  370M → 80M
+        MMLUAux(),                     # en 多选题型  nanochat: 100K 行  28.1M
+        GSM8K(),                       # 数学/分步推理  全量 7,473 行  1.2M
         Identity(1000), Identity(1000),  # 身份 ×2 个 epoch,和 nanochat 一样
-        SimpleSpelling(200000),        # 拼写  nanochat: 200K 行
-        SpellingBee(80000),            # 数字母  nanochat: 80K 行
+        SimpleSpelling(200000),        # 拼写  nanochat: 200K 行  6.4M
+        SpellingBee(80000),            # 数字母  nanochat: 80K 行  11.7M
         # ---- 以下是 nanochat 没有的中文侧 ----
-        COIGCQIA(),                    # zh 通用对话,对应 SmolTalk
-        C3(),                          # zh 多选题型,对应 MMLU_AuxTrain
+        COIGCQIA(),                    # zh 通用对话,对应 SmolTalk  全量 44,694 行
+        C3(),                          # zh 多选题型,对应 MMLU_AuxTrain  11,869 行
     ]
 
 
