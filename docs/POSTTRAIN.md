@@ -1,14 +1,28 @@
 # 后训练日志
 
-Summer-0.5B 的 chat 线:**midtrain → SFT**。每一版改了什么、量到了什么、
-结论是什么,按时间顺序记在这里。
+Summer-0.5B 的 chat 线。每一版改了什么、量到了什么、结论是什么,按时间顺序记在这里。
 
 - 数据格式和特殊 token 的**约定**在 [`DATA_FORMAT.md`](DATA_FORMAT.md)
 - 底座训练和评测**结果**在 [`reports/summer-0.5b-pretrain.md`](reports/summer-0.5b-pretrain.md)
 - 这里只记**每次改动**和它的效果。同一件事不重复写。
 
-对齐目标是 nanochat 的 d20(560M / 约 11B token,和 S0 的 524M / 13B 同一档)。
-官方 chatsft checkpoint 在手,能直接跑对照 —— 加载方法见文末。
+对齐基准是 **Summer = nanochat + 中文 + ReTok**,架构固定 Qwen3 ——
+所以**偏离才需要理由**,对齐不需要。架构类的对齐项已关闭(见「对齐清单」)。
+
+对照的是 nanochat 的 d20。按它的 depth 惯例(`hidden = depth×64`)换算到我们的
+81903 词表,d20 = 596M / 嵌入 17.6%,和 Summer-0.5B 的 524M / 16.0% **同一鳞级**
+—— 是公平对照,不是以小博大。官方 chatsft checkpoint 在手,加载方法见文末。
+
+**两套设计,不要混着抄:**
+
+```
+         旧版(= d20,v1~v5 对照的)        新版(设计 B,上游 1ddaad1 之后)
+预训练   连续流,无 BOS 对齐               BOS + best-fit
+midtrain 连续流,全速 lr,整段算 loss       没有(混比并进 SFT)
+SFT      best-fit,lr 2%,assistant-only   best-fit,**lr 0.8**,assistant-only
+```
+
+v1~v5 走的是旧版(两阶段);从预演起转向设计 B(单阶段)。
 
 ## 版本一览
 
