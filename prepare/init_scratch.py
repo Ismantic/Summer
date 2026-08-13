@@ -57,6 +57,56 @@ def load_arch(arch_dir: str) -> dict:
     return json.loads(open(path).read())
 
 
+def scale_arch(raw: dict, depth: int) -> dict:
+    """把架构模板按 **nanochat 的 depth 惯例**缩放:`hidden = depth × 64`。
+
+    用途是**给流程做预演** —— 拿一个小模型把整条链(编码 → 预训练 → midtrain →
+    SFT → 评测)走通,再上大的,省掉在 0.5B 上返工 4 天。
+
+    保留 Qwen3 的比例(`--arch_from` 那份模板给的):`intermediate = 3 × hidden`、
+    GQA 2:1、`head_dim` 不变(128)。**只动 L 和 h**,别的照抄模板 ——
+    「模型结构就用 Qwen3」。
+
+    ## 小模型的数字有哪些不能当真
+
+    词表 81903 是固定的,所以**模型越小,嵌入占比越高**:
+
+        28L/1024H   524.3M   嵌入 16.0%   ← Summer-0.5B
+        20L/1280H   596.4M        17.6%   ← nanochat d20 的对应鳞级
+        12L/ 768H   169.1M        37.2%
+        10L/ 640H   113.9M        46.0%
+
+    16% 和 46% 不是同一种模型。**凡是和嵌入/词表耦合的结论都不能从小模型往上推**
+    —— 特殊 token 学不学得动、tie 的影响、停止率、格式跟随,这几样恰好都是
+    `docs/POSTTRAIN.md` 在追的。小模型用来验「链路跑不跑得通」,不是用来定配方。
+    """
+    if depth <= 0:
+        return raw
+    h = depth * 64
+    hd = raw["head_dim"]
+
+    # **注意力的头数不能用 `hidden // head_dim` 算。** Qwen3-0.6B 是
+    # 16 heads × head_dim 128 = **2048**,而 hidden 只有 1024 —— q/o 的投影维度
+    # 是 hidden 的 2 倍。按 hidden//head_dim 算会得出 8 个头(缩水一半),
+    # 而且**不会报错**,只会训出个「差不多但不是 Qwen3」的模型。
+    # 正确做法:保留模板的两个比例。
+    q_ratio = raw["num_attention_heads"] * hd / raw["hidden_size"]      # 0.6B 是 2.0
+    gqa = raw["num_attention_heads"] // raw["num_key_value_heads"]      # 0.6B 是 2
+    mlp_ratio = raw["intermediate_size"] / raw["hidden_size"]           # 0.6B 是 3.0
+
+    nh = round(q_ratio * h / hd)
+    if nh < gqa or nh % gqa:
+        raise ValueError(
+            f"depth {depth} → hidden {h} 算出 {nh} 个头,不能被 GQA 比例 {gqa} 整除。"
+            f"换一个 depth(hidden 需要是 {int(hd * gqa / q_ratio)} 的倍数)。")
+    out = dict(raw)
+    out.update(num_hidden_layers=depth, hidden_size=h,
+               intermediate_size=int(mlp_ratio * h),
+               num_attention_heads=nh,
+               num_key_value_heads=nh // gqa)
+    return out
+
+
 def main(args):
     piece_model, cn_dict = (args.tokenizer_model, args.cn_dict)
     if not piece_model:
@@ -74,6 +124,14 @@ def main(args):
         special_token_ids[t] = idx
 
     raw = load_arch(args.arch_from)
+    if args.depth:
+        base = (f"{raw['num_hidden_layers']}L/{raw['hidden_size']}H")
+        raw = scale_arch(raw, args.depth)
+        print(f"**按 depth {args.depth} 缩放**:{base} → "
+              f"{raw['num_hidden_layers']}L/{raw['hidden_size']}H"
+              f"(hidden = depth×64,nanochat 的惯例)")
+        print(f"  小模型是给**流程预演**用的 —— 嵌入占比会高很多,"
+              f"和嵌入/词表耦合的结论不能往上推,见 scale_arch 的说明")
     print(f"架构模板 {args.arch_from}")
     print(f"  {raw['num_hidden_layers']}L / {raw['hidden_size']}H / "
           f"{raw['intermediate_size']}I / GQA {raw['num_attention_heads']}:"
@@ -148,4 +206,9 @@ if __name__ == "__main__":
     p.add_argument("--dtype", choices=list(DTYPES), default="float32")
     p.add_argument("--initializer_range", type=float, default=0.02)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--depth", type=int, default=0,
+                   help="按 nanochat 惯例缩放架构:hidden = depth×64,层数 = depth。"
+                        "0=不缩放(用 --arch_from 的原尺寸)。"
+                        "**给流程预演用**,小模型的嵌入占比高很多,"
+                        "和嵌入/词表耦合的结论不能往上推")
     main(p.parse_args())
