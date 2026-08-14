@@ -187,7 +187,7 @@ def SFT_TASKS():
 # 84M,而中文多选(C3)全量只有 2.1M。我们已经量到英文格式跟随 0.96 早就饱和、
 # 中文才 0.78 —— 再加 3 倍英文多选只会把这个差距拉得更开,而不是补短板。
 # 真正该做的是补中文多选的量,那是数据问题。
-def CHAT_TASKS():
+def CHAT_TASKS(mmlu_epochs: int = 3):
     from prepare.tasks.arc import ARC
     from prepare.tasks.c3 import C3
     from prepare.tasks.coig_cqia import COIGCQIA
@@ -199,7 +199,11 @@ def CHAT_TASKS():
     from prepare.tasks.zh_instruct import AlpacaGPT4ZH, FireflyZH, MagpieZH
     return [
         SmolTalk(stop=100000),         # 偏离:它用全量 460K,见上面的账
-        *[MMLUAux() for _ in range(3)],  # ×3,照抄 --mmlu-epochs(补中文供给后负担得起)
+        # **×3 是上游新版 chat_sft 的默认(--mmlu-epochs);但 d20 的 midtrain 只有 ×1。**
+        # 而 MMLU-aux 的来源是「ARC / MC_TEST / OBQA / RACE」—— 它不只帮 mmlu,
+        # **也直接帮 arc_easy**。所以拿 ×3 的成绩和 d20 比,两个胜负都不干净。
+        # `mix=chat_mmlu1` 就是为了拿干净结论的对照(见 MIXES)。
+        *[MMLUAux() for _ in range(mmlu_epochs)],
         ARC("ARC-Easy"), ARC("ARC-Challenge"),  # **d20 的 SFT 里有 ARC train**
         *[GSM8K() for _ in range(4)],  # ×4,照抄 --gsm8k-epochs
         Identity(1000), Identity(1000),
@@ -236,7 +240,11 @@ def CHAT_TASKS():
 
 MIXES = {"midtrain": MIDTRAIN_TASKS, "sft": SFT_TASKS,
          "chat_pretrain": MIDTRAIN_TASKS,
-         "chat": CHAT_TASKS}                      # 设计 B:单阶段
+         "chat": CHAT_TASKS,                      # 设计 B:单阶段
+         # **对照组:MMLU 只 1 个 epoch,和 d20 的 midtrain 一致。**
+         # 其余一切和 `chat` 逐项相同 —— 单变量,既能拿干净的对 d20 胜负,
+         # 也能量出 MMLU ×3 到底值多少点。
+         "chat_mmlu1": lambda: CHAT_TASKS(mmlu_epochs=1)}
 
 
 # ------------------------------------------------------------------ 编码
