@@ -187,7 +187,8 @@ def SFT_TASKS():
 # 84M,而中文多选(C3)全量只有 2.1M。我们已经量到英文格式跟随 0.96 早就饱和、
 # 中文才 0.78 —— 再加 3 倍英文多选只会把这个差距拉得更开,而不是补短板。
 # 真正该做的是补中文多选的量,那是数据问题。
-def CHAT_TASKS(mmlu_epochs: int = 3):
+def CHAT_TASKS(mmlu_epochs: int = 3, smoltalk: int | None = 172000,
+               firefly: int = 35000):
     from prepare.tasks.arc import ARC
     from prepare.tasks.c3 import C3
     from prepare.tasks.coig_cqia import COIGCQIA
@@ -198,7 +199,10 @@ def CHAT_TASKS(mmlu_epochs: int = 3):
     from prepare.tasks.spelling import SimpleSpelling, SpellingBee
     from prepare.tasks.zh_instruct import AlpacaGPT4ZH, FireflyZH, MagpieZH
     return [
-        SmolTalk(stop=100000),         # 偏离:它用全量 460K,见上面的账
+        # **读 17.2 万条,实得约 10 万完整对话。** 不切分之后 SmolTalk 有 41.6%
+        # 装不下 seq 1024(它是唯一的多轮源),所以往后多读来补齐 —— 池子有 46 万,
+        # 够。**代价是「读得更靠后」,不是「数据变少」。**
+        SmolTalk(stop=smoltalk),       # None = 全量 460,341(= d20)
         # **×3 是上游新版 chat_sft 的默认(--mmlu-epochs);但 d20 的 midtrain 只有 ×1。**
         # 而 MMLU-aux 的来源是「ARC / MC_TEST / OBQA / RACE」—— 它不只帮 mmlu,
         # **也直接帮 arc_easy**。所以拿 ×3 的成绩和 d20 比,两个胜负都不干净。
@@ -231,7 +235,7 @@ def CHAT_TASKS(mmlu_epochs: int = 3):
         # **配到对半的理由**:预训练语料本身是中英 50:50(`SCRATCH_WEIGHTS`),
         # 后训练偏到一边会浪费底座的一半;而且 v4/v5 唯一成功的那个阶段就是对半。
         MagpieZH(),                    # 中文侧的 SmolTalk:自合成对话,答案偏长
-        FireflyZH(stop=35000),         # 广度:15 种任务类型,答案偏短
+        FireflyZH(stop=firefly),       # 广度:15 种任务类型,答案偏短
         AlpacaGPT4ZH(),
         COIGCQIA(),                    # 保留 —— 知乎长答那类,别的源没有
         C3(),                          # zh 多选题型,对应 MMLU_AuxTrain
@@ -244,12 +248,32 @@ MIXES = {"midtrain": MIDTRAIN_TASKS, "sft": SFT_TASKS,
          # **对照组:MMLU 只 1 个 epoch,和 d20 的 midtrain 一致。**
          # 其余一切和 `chat` 逐项相同 —— 单变量,既能拿干净的对 d20 胜负,
          # 也能量出 MMLU ×3 到底值多少点。
-         "chat_mmlu1": lambda: CHAT_TASKS(mmlu_epochs=1)}
+         "chat_mmlu1": lambda: CHAT_TASKS(mmlu_epochs=1),
+         # **v8:SmolTalk 放到全量,中文按比例跟上,保持中文约 35%。**
+         #
+         # 起因是把 v7 和 d20 的**条数构成**逐项对了一遍:
+         #
+         #             d20(871K 条)      v7(870K 条)
+         #   SmolTalk    470K = 54%       100K = 11.5%   ← 差 4.7 倍
+         #   拼写        281K = 32%       280K = 32%      一样
+         #   MMLU-aux    100K = 11.5%     100K = 11.5%    一样
+         #
+         # **拼写和 MMLU 的占比和它一模一样,唯独真实对话少 4.7 倍。**
+         # 而 SmolTalk 正是「长答案 + <end>」的主要来源 —— 这解释了停止率卡在
+         # 67~71%:模型见过的「答完一整段再收尾」太少。
+         #
+         # 那个 100K 上限是当初中文只有 33,700 条时设的(不截中文会被压到 1.9%)。
+         # 补了中文供给之后那个约束没有了。
+         #
+         # **两处一起动是有意的对照设计,不是混淆**:SmolTalk 拉满的同时把中文
+         # 按比例提上去,**让中文条数占比保持不变**,这样变的只有「真实对话占比」。
+         "chat_full": lambda: CHAT_TASKS(mmlu_epochs=1, smoltalk=None,
+                                         firefly=228000)}
 
 
 # ------------------------------------------------------------------ 编码
-def encode_turns(tok, turns, seq_len):
-    """→ [(ids, mask), ...]。**一条对话可能切成多段**,不是丢掉。
+def encode_turns(tok, turns, seq_len, split=False):
+    """→ [(ids, mask), ...]。`split=False`(默认)时**只产出完整对话**,装不下就丢。
 
     mask=1 的位置要算 loss(只在助手回复及其 eos 上)。
 
@@ -321,6 +345,17 @@ def encode_turns(tok, turns, seq_len):
         if prefix_len + len(turn_ids) > seq_len:
             continue                      # 单轮就超长,这一轮丢掉
         if len(ids) + len(turn_ids) > seq_len:
+            if not split:
+                # **对齐 nanochat:不切分。** 它的 chat_sft.py 只放「整条装得下」
+                # 的对话,装不下就留在缓冲区等下一行,注释写着
+                # 「pad the remainder instead of cropping — This ensures we
+                # never discard any tokens」。**从不产生残片。**
+                #
+                # 我们原来切段,理由是「整条丢掉等于扔掉四成数据」(seq 1024 下
+                # SmolTalk 有 40.9% 装不下)。但切出来的第二段开头是个引用了
+                # 不存在前文的用户提问 —— **那种上下文推理时永远不会出现**,
+                # 等于拿模型没见过的分布去训它。
+                return []
             if any(mask):                 # 上一段有监督内容才留
                 segs.append((ids, mask))
             start_seg(sys_content)
@@ -442,7 +477,10 @@ def main() -> int:
                     f"打包出了长度 {len(row_i)} 的序列,超过 seq_len={seq_len}")
             n_pad = seq_len - len(row_i)
             padded += n_pad
-            all_ids.append(np.asarray(row_i + [pad_id] * n_pad, dtype=np.int32))
+            # **补 BOS 不补 <pad>,对齐 nanochat**(chat_sft.py:`row.extend(
+            # [bos_token] * remaining)`)。两者都 mask=0、都在行尾,数值上等价;
+            # 对齐是为了少一处「我们和它不一样」的地方。
+            all_ids.append(np.asarray(row_i + [tok.bos_token_id] * n_pad, dtype=np.int32))
             all_mask.append(np.asarray(row_m + [0] * n_pad, dtype=np.uint8))
 
         rows = 0
