@@ -93,6 +93,29 @@ def build_prompts(n: int) -> list[tuple[str, str]]:
     return out + zh
 
 
+# ---------------------------------------------------------------- 长回答判据
+#
+# **停止率单独看是有缺陷的**:一个把所有问题都用 36 个 token 打发掉的模型会拿到
+# 很高的停止率,却毫无用处 —— 而 v7 的中文正是这样(成功样本长度中位 36,
+# 英文是 276)。所以要配一个「答得够长、没崩、还收了尾」的判据一起看。
+#
+#     长回答成功 = 生成 ≥ min_len token  且  复读率 < 0.2  且  自然停止
+#
+# 三个条件缺一不可:只要长度会奖励复读到烧满预算的;只要复读率会奖励一句话答完的;
+# 只要停止会奖励 36 token 打发一切的。
+def rep_ratio(text: str, n: int = 24) -> float:
+    """粗略复读率:长度 n 的子串里重复出现的占比。1.0 = 完全复读。"""
+    if len(text) < n * 2:
+        return 0.0
+    g = [text[i:i + n] for i in range(0, len(text) - n, n)]
+    return 1.0 - len(set(g)) / max(len(g), 1)
+
+
+def longform_ok(text: str, n_tok: int, stopped: bool,
+                min_len: int = 150, max_rep: float = 0.2) -> bool:
+    return stopped and n_tok >= min_len and rep_ratio(text) < max_rep
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -120,6 +143,7 @@ def main() -> int:
         SamplingParams(temperature=0.0, max_tokens=budget, stop_token_ids=stop))
 
     stopped = {"en": 0, "zh": 0}
+    longok = {"en": 0, "zh": 0}
     lens: dict[str, list[int]] = {"en": [], "zh": []}
     disagree = 0
     for (lang, _), o in zip(prompts, outs):
@@ -133,6 +157,8 @@ def main() -> int:
         disagree += int(nat != heur)
         stopped[lang] += int(nat)
         lens[lang].append(len(gen))
+        txt = tok.decode(list(gen), skip_special_tokens=True)
+        longok[lang] += int(longform_ok(txt, len(gen), nat))
 
     tot = sum(stopped.values())
     p = tot / len(prompts)
@@ -143,7 +169,11 @@ def main() -> int:
         k = len(lens[lang])
         if k:
             print(f"  {tag}  [{lang}] 自然停止 {stopped[lang]}/{k} = "
-                  f"{stopped[lang] / k:.1%}   平均生成 {sum(lens[lang]) / k:.0f} token")
+                  f"{stopped[lang] / k:.1%}   **长回答成功 {longok[lang]}/{k} = "
+                  f"{longok[lang] / k:.1%}**   平均生成 {sum(lens[lang]) / k:.0f} token")
+    print(f"  {tag}  长回答成功合计 {sum(longok.values())}/{len(prompts)} = "
+          f"{sum(longok.values()) / len(prompts):.1%}"
+          f"   (≥150 token、复读 <0.2、且自然停止)")
     print(f"  {tag}  自然停止 {tot}/{len(prompts)} = {p:.1%} "
           f"(标准误 ±{se * 100:.1f} 点)   平均生成 {avg:.0f} token   预算 {budget}")
     if disagree:
