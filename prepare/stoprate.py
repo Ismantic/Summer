@@ -17,15 +17,30 @@ v4 那一版(midtrain 打包改连续流)在中文停止率上 +40 点、格式�
 比两个版本时还要再退一步:**两个 ±3.3 相减,差值的标准误是 4.6** ——
 v4 的 67.0% 和 v5 的 71.5% 差 4.5 点,仍然不算数。
 
-## prompt 从哪来:可复现的构造,不手写
+## prompt 从哪来:**留出的真实指令**(2026-08-14 换过一次,原因见下)
 
-原来那 20 条是手写的、只存在临时目录里,机器一重启就没了(2026-08-13 真的
-发生了)。**手写 prompt 集没法复现也没法审。** 改成从两个已在本地缓存的评测集
-构造:ARC-Easy test 的问句(en)+ C-Eval val 的问句(zh),**去掉选项只留问句**,
-于是变成开放问答。确定、离线、中英各半。
+    en   SmolTalk 第 100,000 条之后的首轮用户提问(训练只用了前 10 万)
+    zh   Firefly 第 35,000 条之后、CJK 占比 > 0.3 的提问(训练只用了前 3.5 万)
 
-**这批数字不能和历史上的 65% / 70% / nanochat 的 95% 直接比** —— prompt 集换了。
-要横向比就得用同一批 prompt 重测每个 ckpt。
+两边都是**真实的开放式指令**,而且都在训练用量之外 —— 留出的。
+
+### 上一版是坏的:从选择题题面去掉选项
+
+原先是拿 ARC-Easy test 和 C-Eval val 的**题面去掉选项**当开放问答。
+构造可复现(手写的那 20 条随机器重启丢过一次),但**只验了「能不能离线跑通」,
+没验「去掉选项之后还成不成题」**:
+
+    en    2/100 含「指向被删选项」的标志
+    zh  **100/100**  —— 「下列各句中,没有语病的一句是____」「选填哪项最恰当____」
+
+**全部 100 条中文 prompt 都无法回答。** 模型答不出来就退化成复读,于是
+2026-08-14 之前报的每一个中文停止率(v3 29% / v4 69% / v5 73% / v6 37% /
+v7 57%,以及三版预演)都是在无效 prompt 上量的,**绝对值没有意义**。
+跨版本的方向可能还成立(同一批 prompt),但「中英不对称」那个结论至少一部分
+是这个缺陷造出来的。
+
+英文侧碰巧成立(ARC 的「Which piece of safety equipment is used to…」有真实
+答案),所以英文的数受影响小 —— 但为了两侧同源,一起换掉了。
 
 ## 预算为什么是 600
 
@@ -46,24 +61,36 @@ if not os.environ.get("SUMMER_MC_ONLINE"):
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+#: 训练用量 —— prompt 从这之后取,保证是留出的。改混比时这两个数要跟着改。
+SMOLTALK_TRAINED = 100000
+FIREFLY_TRAINED = 35000
+
+
+def _cjk(t: str) -> float:
+    return sum(1 for c in t if "\u4e00" <= c <= "\u9fff") / max(len(t), 1)
+
+
 def build_prompts(n: int) -> list[tuple[str, str]]:
-    """→ [(lang, prompt)]。中英各 n/2,顺序固定。"""
-    from datasets import load_dataset
+    """→ [(lang, prompt)]。中英各 n/2,顺序固定,**全部取自训练用量之外**。"""
+    import itertools
+    from prepare.tasks.smoltalk import SmolTalk
+    from prepare.tasks.zh_instruct import FireflyZH
     half = n // 2
     out: list[tuple[str, str]] = []
-    ds = load_dataset("allenai/ai2_arc", "ARC-Easy", split="test")
-    out += [("en", r["question"]) for r in list(ds)[:half]]
+    for turns in itertools.islice(iter(SmolTalk()), SMOLTALK_TRAINED, None):
+        q = turns[0][1].strip()
+        if 20 <= len(q) <= 400:          # 太短没信息,太长是贴代码
+            out.append(("en", q))
+        if len(out) >= half:
+            break
     zh: list[tuple[str, str]] = []
-    for s in ["high_school_chinese", "high_school_history", "law", "logic",
-              "teacher_qualification", "physician", "accountant",
-              "middle_school_geography", "operating_system", "computer_network"]:
+    for turns in itertools.islice(iter(FireflyZH()), FIREFLY_TRAINED, None):
+        q = turns[0][1].strip()
+        if 10 <= len(q) <= 400 and _cjk(q) > 0.3:   # Firefly 里混了英文条目
+            zh.append(("zh", q))
         if len(zh) >= half:
             break
-        for r in load_dataset("ceval/ceval-exam", s, split="val"):
-            zh.append(("zh", r["question"]))
-            if len(zh) >= half:
-                break
-    return out + zh[:half]
+    return out + zh
 
 
 def main() -> int:
