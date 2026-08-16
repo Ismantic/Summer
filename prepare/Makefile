@@ -14,6 +14,9 @@
 #   make s0              长跑约 6 天,每 2000 步自动测一次 WMT22 5-shot BLEU
 #   make encode-anneal-mt  编带平行语料的退火集(CPU,可与训练并行)
 #   make s1 STEP=40000     换退火集跑最后 4514 步(学习率同时衰到 10%)
+#   make encode-scratch3   重做预训练用的语料:EN 单源对齐 nanochat + CN 筛过
+#                          简繁/质量,14.6B token,bos_bestfit 打包
+#   make s0b               同一个 init 重跑一遍(唯一变量是数据),约 7 天
 #
 #   24GB 卡上要降 batch:make p1 BATCH=4 ACCUM=64 / make p2 BATCH=4 ACCUM=32
 #
@@ -319,6 +322,94 @@ health-service:
 	systemctl --user daemon-reload
 	systemctl --user enable --now summer-health.service
 	@echo "已装并启动。看:  tail -5 output/health.csv"
+
+# ---------------------------------------------------------------- S0B:重做预训练
+#
+# **不是续训,是从同一个 init 重新跑一遍 S0**,唯一变量是数据(SCRATCH3_WEIGHTS
+# + bos_bestfit 打包,对齐 nanochat)。复用 $(INIT_S)(architecture/词表都没变,
+# init_scratch.py 是确定性的),这样「底座好不好」这个问题里只有数据配方在变,
+# 别的都跟 S0 一样 —— 这是刻意的对照设计,不是偷懒。
+#
+# 2026-08-16 决定,原因见 encode_corpus.py 里 SCRATCH3_WEIGHTS 的大段注释:
+# 英文单源对齐 nanochat(FineWebEdu),中文筛掉繁体混杂的 CC_CN/Wikipedia_CN,
+# 打包方式换成 bos_bestfit(算法对齐 nanochat 的 dataloader,S0 用的是 stream)。
+#
+# 14.6B token / 262,144 token 每步 ≈ 55,695 步,和 S0 的 45,149 步不是同一个
+# 数 —— 编完 encode-scratch3 后从日志的实得 chunk 数重新算,不要用这个估计值
+# 直接开跑。**S0B_STEPS 必须显式覆盖**,默认值只是占位。
+S0B        ?= $(OUT)/summer05b_s0b
+S0B_DATA   ?= $(OUT)/scratch3_1024
+S0B_STEPS  ?= 55695
+S0B_SHARDS  = $(shell ls $(S0B_DATA).s*.pt 2>/dev/null | paste -sd,)
+
+.PHONY: encode-scratch3 s0b s0b-resume s0b-service
+
+encode-scratch3:
+	$(PY) $(HERE)encode_corpus.py --mix scratch3 \
+	    --tokenizer_model $(PIECE) --cn_dict $(CN_DICT) \
+	    --output $(S0B_DATA) --total_tokens 14600000000 --seq_length 1024 \
+	    --pack bos_bestfit --shard_output --num_workers 6 --max_tokens_per_shard 250000000
+
+s0b:
+	@test -n "$(S0B_SHARDS)" || { echo "没有 $(S0B_DATA).s*.pt —— 先 make encode-scratch3"; exit 2; }
+	$(PY) $(ROOT)/src/train.py \
+	    --model_path $(INIT_S) --train_data "$(S0B_SHARDS)" --mode clm \
+	    --output_dir $(S0B) \
+	    --max_seq_length 1024 --batch_size $(S0_BATCH) \
+	    --gradient_accumulation_steps $(S0_ACCUM) \
+	    --gradient_checkpointing --compile \
+	    --param_dtype float32 --ce_chunk 4096 \
+	    --max_steps $(S0B_STEPS) --warmup_steps 2000 \
+	    --lr_schedule wsd --lr_decay_steps $$(( $(S0B_STEPS) / 10 )) \
+	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
+	    --max_grad_norm 1.0 --seed 42 \
+	    --num_workers $(S0_WORKERS) \
+	    --save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
+	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S0B)/bleu_curve.jsonl'
+
+s0b-resume:
+	$(PY) $(ROOT)/src/train.py \
+	    --model_path $(INIT_S) --resume_from $(S0B)/checkpoint-$(STEP) \
+	    --train_data "$(S0B_SHARDS)" --mode clm \
+	    --output_dir $(S0B) \
+	    --max_seq_length 1024 --batch_size $(S0_BATCH) \
+	    --gradient_accumulation_steps $(S0_ACCUM) \
+	    --gradient_checkpointing --compile \
+	    --param_dtype float32 --ce_chunk 4096 \
+	    --max_steps $(S0B_STEPS) --warmup_steps 2000 \
+	    --lr_schedule wsd --lr_decay_steps $$(( $(S0B_STEPS) / 10 )) \
+	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
+	    --max_grad_norm 1.0 --seed 42 \
+	    --num_workers $(S0_WORKERS) \
+	    --save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
+	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S0B)/bleu_curve.jsonl'
+
+# 开机自动续 —— 同 s0-service 的理由(2026-08-02 那次硬重启,GPU 空转 3.5 小时)
+S0B_UNIT := $(HOME)/.config/systemd/user/summer-s0b.service
+
+s0b-service:
+	@mkdir -p $(dir $(S0B_UNIT))
+	@printf '%s\n' \
+	  '[Unit]' \
+	  'Description=Summer-0.5B S0B pretraining redo (auto-resume)' \
+	  'StartLimitIntervalSec=3600' \
+	  'StartLimitBurst=5' \
+	  '' \
+	  '[Service]' \
+	  'Type=simple' \
+	  'WorkingDirectory=$(abspath $(ROOT))' \
+	  'Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True' \
+	  'ExecStart=/usr/bin/env bash $(HERE)s0b_autoresume.sh' \
+	  'Restart=on-failure' \
+	  'RestartSec=120' \
+	  '' \
+	  '[Install]' \
+	  'WantedBy=default.target' \
+	  > $(S0B_UNIT)
+	systemctl --user daemon-reload
+	systemctl --user enable --now summer-s0b.service
+	@echo
+	@echo "已装并启动。开机自启还需要一次:  loginctl enable-linger \$$USER"
 
 encode-scratch2:
 	$(PY) $(HERE)encode_corpus.py --mix scratch2 \
