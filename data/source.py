@@ -124,12 +124,17 @@ PRETRAIN_SOURCES = {
     # ---------------- EN ----------------
     "FineWebEdu": Source(
         name="FineWebEdu", kind="hf", repo_id="HuggingFaceFW/fineweb-edu",
-        subdir="fineweb-edu", part_glob="sample/10BT/*.parquet", n_parts=None,
-        allow_patterns=["sample/10BT/*.parquet"], lang="en",
-        note="英文教育向网页。只用 sample/10BT 子集 —— **它总共就 14 个文件 / "
-             "28.5GB**,不是被截断了。原来写 n_parts=20,于是 status 永远显示"
-             "「14/20」,看着像缺文件。仓库全量是 113 个 CC-MAIN-* 目录。"
-             "v18 读的是转成 jsonl 的 sample-10bt-*.json。",
+        subdir="fineweb-edu-100bt", part_glob="sample/100BT/*.parquet", n_parts=40,
+        allow_patterns=["sample/100BT/*.parquet"], lang="en",
+        note="英文教育向网页。2026-08-16 从 sample/10BT(14 个文件,全量)换到"
+             "sample/100BT 取前 40 个 —— S0B(scratch3)用 bos_bestfit 打包,"
+             "实测丢弃约 51%(nanochat 自述约 35%,我们的更高),sample/10BT 那"
+             "9.4B 原始 token 打包后只剩 4.7B,喂不满 70% 的 10.22B 配额。"
+             "sample/10BT 是它自己独立的采样,不是 100BT 的子集,两者会有重叠"
+             "但改注册后不再读 10BT 那 14 个文件(留在磁盘上没删,不影响正确性,"
+             "想省磁盘可以手动清)。40 个文件按同密度估算给约 29% 余量。"
+             "v18 读的是转成 jsonl 的 sample-10bt-*.json,这条历史注记随旧子集"
+             "一起过时,不再适用。",
     ),
     "Wikipedia_EN": Source(
         name="Wikipedia_EN", kind="hf", repo_id="HuggingFaceFW/finewiki",
