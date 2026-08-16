@@ -1,6 +1,34 @@
 """自由生成的停止率 —— chat 线的**主判据**。
 
-    python prepare/stoprate.py <ckpt> [n=200] [budget=600]
+    python prepare/stoprate.py <ckpt> [n=200] [budget=600] [rp=1.0]
+
+## rp(repetition_penalty)——2026-08-16 加的第四个参数
+
+**默认 1.0(贪心,不加惩罚)**,和历史上所有 v1~v7、以及 nanochat d20/d12 的
+数字保持同一协议、可以直接比。
+
+但贪心不是真实部署会用的策略 —— nanochat 自己的 `chat_cli.py`(交互)默认
+`temperature=0.6`,只有 `chat_eval.py`(跑分)才用 0.0;MiniMind 同理,
+`eval_model.py` 默认 `temperature=0.85`。**贪心只是为了跑分可比,没有项目
+真的用它部署。**
+
+实测(v7,不重训,只改这一个推理参数):
+
+```
+rp    中文停止率   中文长回答成功   英文长回答成功
+1.0      24%           2%             53%
+1.15     80%          25%             77%   ← 甜蜜点
+1.30     93%          26%             69%   ← 过头,开始伤英文
+```
+
+**`rp=1.15` 是目前测出来的甜蜜点**,把中文长回答成功率从 2% 顶到 25%,
+同时英文还在涨。过了 1.15 继续加,中文停止率还在涨但长回答成功率不再涨、
+中位长度反而下降 —— 那是模型被逼着提前收尾,不是真正学会了收尾。
+
+**报数时 rp 必须显式标出来**,不能像 `--render` 那样漏标 —— 混用会把
+"跑分协议"和"部署协议"的数字放在一起比,那正是这个项目反复踩过的坑
+(渲染格式、prompt 集、打包方式……)。完整推导过程见 `docs/POSTTRAIN.md`
+"决定性发现"那一节。
 
 ## 为什么它是主判据而不是 loss
 
@@ -123,6 +151,7 @@ def main() -> int:
     ckpt = sys.argv[1]
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 200
     budget = int(sys.argv[3]) if len(sys.argv) > 3 else 600
+    rp = float(sys.argv[4]) if len(sys.argv) > 4 else 1.0
 
     from prepare.tokenizer import PieceTokenizerWrapper
     tok = PieceTokenizerWrapper(ckpt)
@@ -137,10 +166,12 @@ def main() -> int:
     from vllm import LLM, SamplingParams
     llm = LLM(model=ckpt, dtype="bfloat16", gpu_memory_utilization=0.85,
               skip_tokenizer_init=True, trust_remote_code=True, enforce_eager=False)
-    # 贪心。**stop_token_ids 给全集**(<end> + <eos>),理由见 tokenizer.py
+    # 贪心 + 可选 repetition_penalty。**stop_token_ids 给全集**(<end> + <eos>),
+    # 理由见 tokenizer.py
     outs = llm.generate(
         [{"prompt_token_ids": x} for x in ids],
-        SamplingParams(temperature=0.0, max_tokens=budget, stop_token_ids=stop))
+        SamplingParams(temperature=0.0, max_tokens=budget, stop_token_ids=stop,
+                        repetition_penalty=rp))
 
     stopped = {"en": 0, "zh": 0}
     longok = {"en": 0, "zh": 0}
@@ -164,7 +195,9 @@ def main() -> int:
     p = tot / len(prompts)
     se = (p * (1 - p) / len(prompts)) ** 0.5
     avg = sum(sum(v) for v in lens.values()) / len(prompts)
-    tag = os.path.basename(ckpt.rstrip("/"))
+    # rp 标进 tag 里,输出行自己说清楚是哪套协议 —— 不能靠人记着当时传了什么参数
+    rp_tag = "" if rp == 1.0 else f"[rp={rp}]"
+    tag = os.path.basename(ckpt.rstrip("/")) + rp_tag
     for lang in ("en", "zh"):
         k = len(lens[lang])
         if k:
