@@ -188,7 +188,7 @@ def SFT_TASKS():
 # 中文才 0.78 —— 再加 3 倍英文多选只会把这个差距拉得更开,而不是补短板。
 # 真正该做的是补中文多选的量,那是数据问题。
 def CHAT_TASKS(mmlu_epochs: int = 3, smoltalk: int | None = 172000,
-               firefly: int = 35000):
+               firefly: int = 35000, magpie: bool = True):
     from prepare.tasks.arc import ARC
     from prepare.tasks.c3 import C3
     from prepare.tasks.coig_cqia import COIGCQIA
@@ -234,7 +234,7 @@ def CHAT_TASKS(mmlu_epochs: int = 3, smoltalk: int | None = 172000,
         #
         # **配到对半的理由**:预训练语料本身是中英 50:50(`SCRATCH_WEIGHTS`),
         # 后训练偏到一边会浪费底座的一半;而且 v4/v5 唯一成功的那个阶段就是对半。
-        MagpieZH(),                    # 中文侧的 SmolTalk:自合成对话,答案偏长
+        *( [MagpieZH()] if magpie else [] ),  # 中文侧的 SmolTalk:自合成对话,答案偏长
         FireflyZH(stop=firefly),       # 广度:15 种任务类型,答案偏短
         AlpacaGPT4ZH(),
         COIGCQIA(),                    # 保留 —— 知乎长答那类,别的源没有
@@ -249,6 +249,20 @@ MIXES = {"midtrain": MIDTRAIN_TASKS, "sft": SFT_TASKS,
          # 其余一切和 `chat` 逐项相同 —— 单变量,既能拿干净的对 d20 胜负,
          # 也能量出 MMLU ×3 到底值多少点。
          "chat_mmlu1": lambda: CHAT_TASKS(mmlu_epochs=1),
+         # **假设 12:「0.5B 模仿不了 72B 的长中文回答」。**
+         #
+         # Magpie 的答案是 Qwen2-72B 合成的,长(中位 441 token)、结构化、质量高。
+         # 让 524M 去模仿它,可能本来就超出能力 —— 学会开头的句式,撑不住就塌。
+         # 这和 ReTok 让 gsm8k 归零是同一类:**能力代价,不是配方缺陷**。
+         #
+         # 单变量交换:**中文条数不变**(318,533 → 约 318,200),只把主导来源从
+         # Magpie(72B 合成、长)换成 Firefly(真实语料、中位 114 token)。
+         #
+         # **预测**:假设成立 → 中文停止率大幅升、复读降;长回答成功率可能仍低,
+         # 因为 Firefly 答案本来就短、够不到 150 token 的门槛。
+         # **所以这一轮的主判据是停止率和复读率,不是长回答成功率。**
+         "chat_zhreal": lambda: CHAT_TASKS(mmlu_epochs=1, magpie=False,
+                                           firefly=235000),
          # **v8:SmolTalk 放到全量,中文按比例跟上,保持中文约 35%。**
          #
          # 起因是把 v7 和 d20 的**条数构成**逐项对了一遍:
