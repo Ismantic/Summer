@@ -352,15 +352,19 @@ health-service:
 # (flash 算法,O(seq) 显存,不是物化 O(seq²) 矩阵),`batch 16→8、accum
 # 16→16` 之后每个 micro-batch 还是 8×2048=16384 token,和原来 16×1024
 # 一样,4090 24G 装得下。RoPE `max_position_embeddings=32768` 早留够余量。
-# 副作用是好的:bos_bestfit 在更长的行里丢弃率应该降(nanochat 自述 2048
-# 下约 35%,我们 1024 下实测约 51%)。
+# 副作用应验了:2048 下实测丢弃率 32%~36%(CN_FineWeb_Edu 41.8% 偏高,
+# FineWebEdu 32%~34%、CCI3-HQ 36%、SkyPile 20.7%~34%),和 nanochat 自述的
+# 35% 基本吻合,比 1024 下的约 51% 好得多。
+#
+# encode-scratch3(seq_len=2048)实跑(2026-08-17):7,128,855 chunk = 14.60B
+# token,en 70.0% / zh 30.0%,零偏差。/ 128(= batch8×accum16)= 55,694 步,
+# **这是实数**。
 S0B        ?= $(OUT)/summer05b_s0b
 S0B_DATA   ?= $(OUT)/scratch3_2048
 S0B_SEQ    ?= 2048
 S0B_BATCH  ?= 8
 S0B_ACCUM  ?= 16
-# **实数,encode 完按日志里的实得 chunk 数重算,不要用这个当结论。**
-S0B_STEPS  ?= 55641
+S0B_STEPS  ?= 55694
 S0B_SHARDS  = $(shell ls $(S0B_DATA).s*.pt 2>/dev/null | paste -sd,)
 
 .PHONY: encode-scratch3 s0b s0b-resume s0b-service
