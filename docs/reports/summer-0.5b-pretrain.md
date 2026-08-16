@@ -343,3 +343,94 @@ S0 期间三次非训练原因的中断,累计白跑约 8.4 小时:两次外部�
 序列、pstore 空)。之后才装的 systemd 服务 + 开机自动续训 + `health.csv`
 状态采样。上传阶段又遇到 WiFi 间断掉线,三次上传两次死在
 `[Errno 101] Network is unreachable`,最后靠幂等重试传完。
+
+## S0B:重做预训练(2026-08-16,进行中)
+
+**不是续训,是从同一个 `init_summer05b` 重新跑一遍 S0** —— 架构、词表、
+初始化都不变(`init_scratch.py` 是确定性的,复用同一份起点),唯一变量是
+数据配方。目标是让这条线的底座比 S0 更好,同时尽量对齐 nanochat 的做法。
+
+### 为什么重做
+
+`docs/POSTTRAIN.md` 收尾时定性过 chat 线的已知限制(中文开放式创作容易
+复读),排查过十几个假设都没找到根因,边际回报已经很低。回头看预训练这一步
+本身有两处明显可以做得更对齐、更干净:
+
+1. **英文语料是五源混合,nanochat 是单源。** 原 `SCRATCH_WEIGHTS` 用
+   FineWebEdu + CC_EN + Wikipedia_EN + Gutenberg + Cosmopedia 五源,
+   而 nanochat 的预训练语料**只有一个源**——
+   `karpathy/fineweb-edu-100b-shuffle`(读的是 `nanochat/dataset.py`
+   源码确认的,不是猜的)。混合源不算错,但既然目标是「Summer = nanochat +
+   中文 + ReTok」,这一步不对齐说不过去。
+2. **中文语料没做过简繁/质量筛查。** 抽样检查才发现 `CC_CN` 和
+   `Wikipedia_CN` 分别有 51.8% / 55.7% 的样本是繁体主导(见下),这两个源
+   在旧配方里合占中文的 22%,而所有下游数据(COIG/Magpie/Firefly/C3)和
+   评测 prompt 全是简体 —— 混进去是隐患,只是之前没人查过。
+
+### 数据配方:`SCRATCH3_WEIGHTS`(`prepare/encode_corpus.py`)
+
+EN:CN = 70:30,总量 14.6B token(FineWebEdu 本地池子实测能出 10.23B,
+正好吃满 70% 那份,零额外下载)。
+
+```
+                简繁            内容质量                    池子可出
+FineWebEdu      —              nanochat 同源                10.23B(=EN 70%)
+CCI3-HQ         100% 简体      干净(博客/资讯/技术)         4.90B
+SkyPile         100% 简体      干净(产品评测/技术/资讯)     12.02B
+CN_FineWeb_Edu   99.9% 简体    参差 —— 部分公文体排比重复    2.61B
+CC_CN            51.8% 繁体    部分乱码/垃圾内容             **丢弃**
+Wikipedia_CN      55.7% 繁体   干净但需简繁转换才能用        **丢弃**
+```
+
+简繁判定不是眼看几条:用 18 组高频简繁字对(国/國、这/這、为/為……)在每条
+样本里计数,`繁体占比 = 繁体字数/(繁体字数+简体字数)`,>0.5 记为繁体主导,
+每个源抽 2000~2500 条统计。CC_CN/Wikipedia_CN 不是「个别样本偶然繁体」,
+是接近对半的系统性混杂。
+
+丢掉这两个源之后 CCI3-HQ + SkyPile 池子合计 16.9B,单独就够撑起中文 30%
+那份(4.38B),不需要补源。CN_FineWeb_Edu 保留但降权到 15%(有真正的百科式
+好文章,但也有公文体排比重复的问题样本,和已知的中文复读问题是同一种句式,
+不敢给它太高权重)。
+
+最终:`FineWebEdu 0.700 / CCI3-HQ 0.1275 / SkyPile 0.1275 /
+CN_FineWeb_Edu 0.045`,4 源。
+
+**考虑过但放弃的:MiniMind 的预训练语料。** `pretrain_t2t_mini.jsonl`
+(127 万行,~94.5% 纯中文)看起来是补中文量的好选择,但抽样直接读内容发现
+它不是原始语料 —— 是把 QA 对硬拼接成连续 "text" 字段、中间没有任何分隔符
+(能看到两个不相关问答直接粘在一起)。训练进去会让模型习惯"话题突然跳转",
+和"单一高质量语料"这个对齐方向本身冲突,不用。
+
+### 格式对齐:`bos_bestfit` 打包
+
+S0 用的是 `stream`(连续流 + 文档末尾 `<eos>`)。这次换成 `bos_bestfit`——
+每行以 `<bos>` 开头 + best-fit 裁剪,算法逐步对齐 nanochat 的
+`tokenizing_distributed_data_loader_with_state_bos_bestfit`。
+
+**这个改动此前专门做过消融,在 114M 规模上没测出收益**(任务 #35,详见
+`docs/POSTTRAIN.md`),代价是约 48% 的 token 被丢弃(best-fit 裁剪不满
+`seq_len` 的尾部)。这次是**为了格式对齐本身**而用它,不是因为消融改变了
+结论 —— 两个理由都摆在这里,不假装消融支持了这个决定。
+
+`--seq_length` 仍是 1024(不是 nanochat 的 2048),`pack_bos_bestfit` 打包
+到刚好 `seq_len` 宽度,和 `src/train.py` 内部的位移约定(`logits[:, :-1]`
+对 `labels[:, 1:]`)一致,不需要 +1。
+
+### 编排
+
+```bash
+make -C prepare encode-scratch3   # 14.6B token,pack=bos_bestfit,约需数小时
+make -C prepare s0b-service       # 装成 systemd 服务,开机自动续训,约 7 天
+```
+
+复用 `INIT_S`(`output/init_summer05b`),输出到 `output/summer05b_s0b`,
+不碰 `output/summer05b_s0`——两边都留着,方便训完直接对照。
+
+**这是一次对照实验,不是替换。** 架构、初始化、超参(batch/lr/schedule)都
+和 S0 一样,只有数据配方和打包方式变了,所以训完如果有差异,可以比较有把握
+地归因到这两点上。步数按实得 token 量重算(14.6B / 262,144 ≈ 55,695 步,
+encode 完按日志里的实得 chunk 数校正,不用这个估计值直接开跑)。
+
+训完之后要走完整的评测对照:mc_eval(字母 MC)+ stoprate(rp=1.15)+ WMT22
+BLEU/COMET,和当前 S0/v7 的数字并排放,才是「底座是不是真的更好」这个问题
+的答案 —— 现在还没有。
