@@ -339,9 +339,27 @@ health-service:
 # 我们的更高),sample/10BT 那 14 个文件(这个子集的全部)打包后只剩 4.7B,
 # 喂不满 70% 的 10.22B 配额。改 data/source.py 把 FineWebEdu 换到
 # sample/100BT 取前 40 个之后重编,实得 14,244,304 chunk(14.59B token,
-# en 70.1% / zh 29.9%,在容差内)。/ 256 = 55,641 步,**这是实数,不是估计值**。
+# en 70.1% / zh 29.9%,在容差内)。
+#
+# **随后又把 seq_len 从 1024 换成 2048**(同日,训到 step 738 就停了重来,
+# 沉没成本可忽略):查了 nanochat 从初始提交起 `max_seq_len` 就是 2048,
+# `miniseries.sh`/`scaling_laws.sh` 扫 d4~d26+ 全系列都没覆盖过这个值——
+# 2048 不是某个模型的特例,是它的统一选择(唯一例外 `runcpu.sh` 的
+# `--max-seq-len=512` 是 CPU 冒烟测试,不是真实训练配置)。既然要对齐,
+# 索性把这个也对上。
+#
+# 显存上可行:`src/model.py` 的注意力是 `F.scaled_dot_product_attention`
+# (flash 算法,O(seq) 显存,不是物化 O(seq²) 矩阵),`batch 16→8、accum
+# 16→16` 之后每个 micro-batch 还是 8×2048=16384 token,和原来 16×1024
+# 一样,4090 24G 装得下。RoPE `max_position_embeddings=32768` 早留够余量。
+# 副作用是好的:bos_bestfit 在更长的行里丢弃率应该降(nanochat 自述 2048
+# 下约 35%,我们 1024 下实测约 51%)。
 S0B        ?= $(OUT)/summer05b_s0b
-S0B_DATA   ?= $(OUT)/scratch3_1024
+S0B_DATA   ?= $(OUT)/scratch3_2048
+S0B_SEQ    ?= 2048
+S0B_BATCH  ?= 8
+S0B_ACCUM  ?= 16
+# **实数,encode 完按日志里的实得 chunk 数重算,不要用这个当结论。**
 S0B_STEPS  ?= 55641
 S0B_SHARDS  = $(shell ls $(S0B_DATA).s*.pt 2>/dev/null | paste -sd,)
 
@@ -350,7 +368,7 @@ S0B_SHARDS  = $(shell ls $(S0B_DATA).s*.pt 2>/dev/null | paste -sd,)
 encode-scratch3:
 	$(PY) $(HERE)encode_corpus.py --mix scratch3 \
 	    --tokenizer_model $(PIECE) --cn_dict $(CN_DICT) \
-	    --output $(S0B_DATA) --total_tokens 14600000000 --seq_length 1024 \
+	    --output $(S0B_DATA) --total_tokens 14600000000 --seq_length $(S0B_SEQ) \
 	    --pack bos_bestfit --shard_output --num_workers 6 --max_tokens_per_shard 250000000
 
 s0b:
@@ -358,8 +376,8 @@ s0b:
 	$(PY) $(ROOT)/src/train.py \
 	    --model_path $(INIT_S) --train_data "$(S0B_SHARDS)" --mode clm \
 	    --output_dir $(S0B) \
-	    --max_seq_length 1024 --batch_size $(S0_BATCH) \
-	    --gradient_accumulation_steps $(S0_ACCUM) \
+	    --max_seq_length $(S0B_SEQ) --batch_size $(S0B_BATCH) \
+	    --gradient_accumulation_steps $(S0B_ACCUM) \
 	    --gradient_checkpointing --compile \
 	    --param_dtype float32 --ce_chunk 4096 \
 	    --max_steps $(S0B_STEPS) --warmup_steps 2000 \
@@ -375,8 +393,8 @@ s0b-resume:
 	    --model_path $(INIT_S) --resume_from $(S0B)/checkpoint-$(STEP) \
 	    --train_data "$(S0B_SHARDS)" --mode clm \
 	    --output_dir $(S0B) \
-	    --max_seq_length 1024 --batch_size $(S0_BATCH) \
-	    --gradient_accumulation_steps $(S0_ACCUM) \
+	    --max_seq_length $(S0B_SEQ) --batch_size $(S0B_BATCH) \
+	    --gradient_accumulation_steps $(S0B_ACCUM) \
 	    --gradient_checkpointing --compile \
 	    --param_dtype float32 --ce_chunk 4096 \
 	    --max_steps $(S0B_STEPS) --warmup_steps 2000 \
