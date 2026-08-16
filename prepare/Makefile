@@ -334,12 +334,15 @@ health-service:
 # 英文单源对齐 nanochat(FineWebEdu),中文筛掉繁体混杂的 CC_CN/Wikipedia_CN,
 # 打包方式换成 bos_bestfit(算法对齐 nanochat 的 dataloader,S0 用的是 stream)。
 #
-# 14.6B token / 262,144 token 每步 ≈ 55,695 步,和 S0 的 45,149 步不是同一个
-# 数 —— 编完 encode-scratch3 后从日志的实得 chunk 数重新算,不要用这个估计值
-# 直接开跑。**S0B_STEPS 必须显式覆盖**,默认值只是占位。
+# encode-scratch3 实跑(2026-08-17):第一次跑完对账报了中英比例偏 18.1 个点
+# ——bos_bestfit 对 FineWebEdu 的实测丢弃率约 51%(nanochat 自述约 35%,
+# 我们的更高),sample/10BT 那 14 个文件(这个子集的全部)打包后只剩 4.7B,
+# 喂不满 70% 的 10.22B 配额。改 data/source.py 把 FineWebEdu 换到
+# sample/100BT 取前 40 个之后重编,实得 14,244,304 chunk(14.59B token,
+# en 70.1% / zh 29.9%,在容差内)。/ 256 = 55,641 步,**这是实数,不是估计值**。
 S0B        ?= $(OUT)/summer05b_s0b
 S0B_DATA   ?= $(OUT)/scratch3_1024
-S0B_STEPS  ?= 55695
+S0B_STEPS  ?= 55641
 S0B_SHARDS  = $(shell ls $(S0B_DATA).s*.pt 2>/dev/null | paste -sd,)
 
 .PHONY: encode-scratch3 s0b s0b-resume s0b-service
