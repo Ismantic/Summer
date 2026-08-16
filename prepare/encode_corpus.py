@@ -10,6 +10,9 @@
                   (配合 --shard_output —— 12B 拼成一份要 48GB 内存)
   --mix anneal_mt → Summer-0.5B 退火段:最高质量单语 0.70 + 中英平行语料 0.30,
                   1.2B token(= WSD 退火窗口 4514 步 × 262,144)
+  --mix scratch3 → Summer-0.5B **重做预训练**(2026-08-16):英文单源对齐
+                  nanochat(FineWebEdu),中文保持多源但筛过简繁/质量,
+                  EN 0.70 / CN 0.30,4 源,14.6B token
 """
 import argparse
 import glob
@@ -130,6 +133,53 @@ SCRATCH2_WEIGHTS = {
     "CN_FineWeb_Edu": 0.084,
     "CC_CN":          0.049,
     "Wikipedia_CN":   0.028,
+}
+
+# Summer-0.5B **重做预训练**(2026-08-16 决定):英文对齐 nanochat,中文保持多源,
+# 总比例 70:30。
+#
+# ## 英文:单源 FineWebEdu,对齐 nanochat
+#
+# nanochat 的预训练语料**只有一个源**——`karpathy/fineweb-edu-100b-shuffle`
+# (重新打乱过的 FineWebEdu 子集),不是我们原来 SCRATCH_WEIGHTS 那种五源混合。
+# 本地已注册的 FineWebEdu 池子(`sample/10BT`,14 个文件,HF 上这个子集的全部)
+# 实测(用我们的分词器)可出 **10.23B token**,直接吃满当 70%,**零额外下载**。
+#
+# 一度考虑过用 MiniMind 的预训练语料补量或补中文,**已放弃**:它的
+# `pretrain_t2t.jsonl` 不是原始语料,是把问答对硬拼接成连续文本、没有分隔符
+# (抽样能看到两个不相关问答直接粘在一起),训练进去会让模型习惯「话题突然
+# 跳转」,和「单一高质量语料」这个对齐方向本身冲突,所以不用。
+#
+# ## 中文:保持多源(用户明确要求),但先做了简繁 + 质量筛查
+#
+# 逐个源抽样验证(script_ratio 用简繁高频字对判定,不是眼看几条就下结论):
+#
+# ```
+#                 简繁            内容质量                    池子可出
+# CCI3-HQ         100% 简体      干净(博客/资讯/技术)         4.90B
+# SkyPile         100% 简体      干净(产品评测/技术/资讯)     12.02B
+# CN_FineWeb_Edu   99.9% 简体    参差 —— 部分公文体排比重复    2.61B
+#                                ("从…转向…从…转向…从…转向"这类,和我们查过的
+#                                 中文复读问题是同一种句式,降权处理)
+# CC_CN            51.8% 繁体    部分乱码/垃圾内容             **丢弃**
+# Wikipedia_CN      55.7% 繁体   干净但需简繁转换才能用        **丢弃**
+#                                (不值得为它引入 OpenCC 转换步骤)
+# ```
+#
+# **CC_CN / Wikipedia_CN 不是个别样本偶然繁体,是接近对半的系统性混杂**——
+# 这两个源在旧配方(SCRATCH_WEIGHTS)里合占中文的 22%,而所有下游数据
+# (COIG/Magpie/Firefly/C3)和评测 prompt 全是简体,混进去是隐患。
+#
+# CCI3-HQ + SkyPile 两个源的池子合计 16.9B,单独就够撑起整个中文份额,
+# 所以丢掉 CC_CN/Wikipedia_CN 之后完全不需要补源。CN_FineWeb_Edu 降权但不丢
+# (samples 里也有真正的百科式好文章,只是占比不够高,降到 15%)。
+SCRATCH3_WEIGHTS = {
+    # ---------------- EN 0.70(单源,对齐 nanochat)----------------
+    "FineWebEdu":     0.700,
+    # ---------------- CN 0.30(多源,42.5/42.5/15,丢弃 CC_CN 和 Wikipedia_CN)----------------
+    "CCI3-HQ":        0.1275,
+    "SkyPile":        0.1275,
+    "CN_FineWeb_Edu": 0.045,
 }
 
 ANNEAL_MT_WEIGHTS = {
@@ -581,7 +631,7 @@ def build_shards(weights, total_tokens, n_workers, tmpdir, seq_len, max_line_cha
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--mix", choices=["main", "anneal", "scratch", "scratch2", "anneal_mt"], required=True)
+    p.add_argument("--mix", choices=["main", "anneal", "scratch", "scratch2", "scratch3", "anneal_mt"], required=True)
     p.add_argument("--tmpdir", default="",
                    help="worker 中间 .npy 的落地目录。默认与 --output 同目录 ——"
                         "中间文件总量等于产物大小,放 /tmp 会撑爆 tmpfs。")
@@ -614,6 +664,7 @@ def main():
 
     weights = {"main": MAIN_WEIGHTS, "anneal": ANNEAL_WEIGHTS,
                "scratch": SCRATCH_WEIGHTS, "scratch2": SCRATCH2_WEIGHTS,
+               "scratch3": SCRATCH3_WEIGHTS,
                "anneal_mt": ANNEAL_MT_WEIGHTS}[args.mix]
     print(f"Mix: {args.mix} | sources: {len(weights)} | total weight {sum(weights.values()):.3f}")
     print(f"Budget: {args.total_tokens:,} tokens "
