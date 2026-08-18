@@ -488,3 +488,37 @@ O(seq²) 矩阵),显存应该基本持平。副作用是好的:bos_bestfit 在�
 理论上丢弃率会降(nanochat 2048 下自述约 35%,我们 1024 下实测约 51%)。
 
 `S0B_DATA` 换成 `output/scratch3_2048`,和 1024 那份区分开,旧的已删除。
+
+### S0B 优化器/LR 调度与 nanochat 的已知偏离(2026-08-18,不修,记录在案)
+
+训到 step 8100(约 1.5 天)时核对了 `scripts/base_train.py` 的优化器和学习率
+调度——`speedrun.sh`/`miniseries.sh` 都没覆盖下面这些参数,说明是它真实生产
+用的默认值,不是没用到的摆设。逐项对比:
+
+```
+                        nanochat 实际用的           我们 S0B 传的
+Muon lr(matrix_lr)      0.02                        0.02              ✓
+Adam beta2              0.95                        0.95              ✓
+调度形状                warmup+stable+decay         WSD(同形状)       ✓
+warmup                  0(默认不预热)                2000 步(3.6%)     ✗
+decay 窗口              最后 40%                     最后 10%          ✗
+decay 终点              降到 0                       降到峰值 10%      ✗
+weight_decay            0.2,训练中线性降到 0          0,恒定           ✗
+Adam beta1              0.8                          0.9(没显式传)     ✗
+Muon momentum           前 300 步 0.85→0.95           恒定 0.95         ✗
+embedding_lr/unembed_lr 分开设(0.3 / 0.004)           不适用——我们 tie 权重,
+                                                      embed 和 lm_head 是
+                                                      同一个张量
+```
+
+**为什么不修,继续跑**:核查时已经 8100/55694 步(约 1.5 天),不是 seq_len
+那次 700 步、2.5 小时的量级——沉没成本已经不小。而且这几项(尤其
+weight_decay 的线性退火调度)`src/train.py` 现在还没实现,真要对齐还得先
+加功能,不是改几个 CLI 参数那么简单。权衡下来选择接受这批偏离,当作
+已知限制记下来,不为了这几项再重来一次。
+
+`embedding_lr`/`unembedding_lr` 分开设那一条**不是遗漏,是结构性差异**:
+nanochat 的 d 系列模型不 tie 嵌入,所以 embed 和 lm_head 是两个独立张量,
+能各给一个 Adam lr;我们的 Summer 架构 tie 权重(state_dict 里没有独立的
+`lm_head.weight`,见 CLAUDE.md),这两者是同一个张量,这个二分从架构上就
+不适用,不算是"没对齐"。
