@@ -375,6 +375,11 @@ encode-scratch3:
 	    --output $(S0B_DATA) --total_tokens 14600000000 --seq_length $(S0B_SEQ) \
 	    --pack bos_bestfit --shard_output --num_workers 6 --max_tokens_per_shard 250000000
 
+# **没有 --inline_eval_cmd。** 2026-08-24 撤掉的:纯单语阶段的 5-shot BLEU
+# 从 step 1000 到 46000 一直在 0.00~0.03 无规律噪声,和 S0 当年"零"那个
+# 现象同源(见 docs/reports/summer-0.5b-pretrain.md)——这个量级的预训练
+# 看它没有信息量,只是每 1000 步多花 ~40s 生成噪声。真正有意义要等以后加
+# 平行语料退火(类似 S0→S1)那一步,那时候再挂钩子。
 s0b:
 	@test -n "$(S0B_SHARDS)" || { echo "没有 $(S0B_DATA).s*.pt —— 先 make encode-scratch3"; exit 2; }
 	$(PY) $(ROOT)/src/train.py \
@@ -389,8 +394,7 @@ s0b:
 	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
 	    --max_grad_norm 1.0 --seed 42 \
 	    --num_workers $(S0_WORKERS) \
-	    --save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
-	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S0B)/bleu_curve.jsonl'
+	    --save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000
 
 s0b-resume:
 	$(PY) $(ROOT)/src/train.py \
@@ -406,8 +410,7 @@ s0b-resume:
 	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
 	    --max_grad_norm 1.0 --seed 42 \
 	    --num_workers $(S0_WORKERS) \
-	    --save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000 \
-	    --inline_eval_cmd '$(PY) $(HERE)eval_hook.py --ckpt {ckpt} --step {step} --curve $(S0B)/bleu_curve.jsonl'
+	    --save_steps 1000 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 10000
 
 # 开机自动续 —— 同 s0-service 的理由(2026-08-02 那次硬重启,GPU 空转 3.5 小时)
 S0B_UNIT := $(HOME)/.config/systemd/user/summer-s0b.service
