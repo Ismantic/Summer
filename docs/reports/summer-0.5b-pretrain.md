@@ -522,3 +522,68 @@ nanochat 的 d 系列模型不 tie 嵌入,所以 embed 和 lm_head 是两个独�
 能各给一个 Adam lr;我们的 Summer 架构 tie 权重(state_dict 里没有独立的
 `lm_head.weight`,见 CLAUDE.md),这两者是同一个张量,这个二分从架构上就
 不适用,不算是"没对齐"。
+
+### 训完了:55,694 步,最终 loss ema 2.7355
+
+2026-08-26 训完,`checkpoint-55000` 之后又跑满剩余步数,最终模型存到
+`output/summer05b_s0b`。全程没有硬重启,`summer-s0b.service` 没被用上。
+
+### 评测踩了一个坑:评测脚本没跟上 BOS 约定,第一轮数字是假的
+
+收尾照抄 S0 当年的评测套路跑了 `bench-nanochat`(似然协议五项)+
+`mc-eval`(字母 MC)+ `trans`(WMT22 5-shot),第一轮结果看着很吓人:
+
+```
+                        S0        S0B(第一轮,坏)
+arc_easy(acc_norm)      0.4949    0.2656    ← 掉到接近随机
+COMET zh-en             0.4638    0.2008    ← 明显更低
+COMET en-zh             0.5872    0.1907    ← 明显更低
+```
+
+而且 `trans` 生成的翻译样本直接复读崩溃("1, 2, \n, \n, \n..."),不是
+"答非所问但流畅"那种温和失败。反而 `mc_eval`(字母 MC)四项全面超过 S0。
+三套判据方向不一致,一度以为这次配方真的带来了某种取舍。
+
+排查下来是**评测脚本的锅,不是模型的锅**:`benchmark.py`(走 lm_eval 的
+`TemplateLM._encode_pair`)和 `translate.py`(自己的 `encode_prompts`)
+都不给输入加 BOS——这对 `stream` 打包的 S0/S1/S2 没问题(它们训练时也
+从没见过 BOS),但 S0B 是 `bos_bestfit` 打包,**训练时每一行都以 BOS 开头**,
+喂它零 BOS 的输入是彻底的分布外。手动给同一条 zh-en 样本 prepend 一个
+BOS,复读崩溃立刻变成正常的(虽然文不对题但流畅的)续写——和 S0 当年
+记录的行为是同一类失败,不是更差。`mc_eval.py` 没这个问题,因为它走
+`apply_chat_template`,本来就带 BOS——三套判据里唯一"恰好没踩坑"的一个。
+
+修法:给 `benchmark.py`/`translate.py`/`eval_hook.py` 都加了 `--add_bos`
+(默认 `False`,不动 S0/S1/S2 的历史协议;Makefile 加 `ADD_BOS=1` 显式开)。
+补上 BOS 之后重跑:
+
+```
+似然协议(bench-nanochat)
+                        S0        S0B(修正后)
+arc_easy(acc_norm)      0.4949    0.5391    ← 超过
+arc_challenge(acc_norm) 0.2671    0.3003    ← 超过
+mmlu(acc)               0.2520    0.2465    ← 基本持平
+gsm8k(flexible)         0.0121    0.0167    ← 基本持平(都接近零)
+ceval-valid(acc_norm)   0.2363    0.2348    ← 基本持平
+
+WMT22 5-shot 翻译
+                zh-en                     en-zh
+S0              BLEU 0.54 / COMET 0.4638  BLEU 3.97 / COMET 0.5872
+S0B(修正后)     BLEU 0.29 / COMET 0.4354  BLEU 2.78 / COMET 0.5505
+
+mc_eval(字母 MC,本来就没问题)
+                        S0        S0B
+四项                    —         全面更高(唯一四项都过随机线的)
+```
+
+**结论:目前四套判据里没有一项 S0B 真的比 S0 差**——mc_eval 和
+arc_easy/arc_challenge 明显更好,mmlu/ceval/gsm8k/翻译基本持平(翻译双方
+都很低,预期内,还没走平行语料退火)。这是这次重做预训练(数据配方对齐
+nanochat + bos_bestfit 打包 + seq_len 2048)的一个正面信号,但**还不构成
+"可以替换 S0"的结论**——S0 被验证过的是走完 SFT→CPO→GRPO 之后的下游翻译
+质量(已发布的 Interpreter-Summer-0.5B),S0B 现在只是一个更好的预训练
+起点,要等它也走完同一条下游流水线才能真正比。
+
+**教训**:`bos_bestfit` 是这次重做的核心改动,凡是给模型喂输入的地方
+(不只是训练数据)都该跟着查一遍要不要加 BOS,不该等数字难看了才回头找——
+这次是反应式排查,应该提前做。
