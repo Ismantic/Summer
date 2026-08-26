@@ -744,10 +744,17 @@ bench:
 #   ceval-valid    中文 —— nanochat 没有,但我们是中英 50:50,只报英文会藏掉一半
 BENCH_NC_TASKS ?= arc_easy:0,arc_challenge:0,mmlu:0,gsm8k:8,ceval-valid:0
 
+# ADD_BOS=1 给 bos_bestfit 打包训出来的模型用(S0B 起)——不加的话这些模型
+# 的似然协议数字会掉到接近随机(2026-08-26 在 S0B 上实测过,见
+# benchmark.py 里 VLLMPiece.__init__ 的说明)。S0/S1/S2 是 stream 打包,
+# **不要**给它们传这个,历史数字要保持同协议。
+ADD_BOS ?=
+
 bench-nanochat:
 	$(PY) $(HERE)benchmark.py --model_path $(CKPT) \
 	    --tasks "$(BENCH_NC_TASKS)" \
-	    --output_dir $(ROOT)/eval_results/nanochat/$(TAG)
+	    --output_dir $(ROOT)/eval_results/nanochat/$(TAG) \
+	    $(if $(ADD_BOS),--add_bos,)
 
 # nanochat 的**字母 MC** 协议:题面渲染成 Multiple Choice、模型输出一个字母。
 #
@@ -771,7 +778,8 @@ trans:
 	$(PY) $(HERE)translate.py --model_path $(CKPT) \
 	    --testset wmt22 --exemplar_set wmt21 --direction both \
 	    --num_fewshot 5 --max_samples 1000 --compute_comet --save_all_samples \
-	    --output_path $(ROOT)/eval_results/translate_wmt22/$(TAG)_vllm_1000_comet.json
+	    --output_path $(ROOT)/eval_results/translate_wmt22/$(TAG)_vllm_1000_comet.json \
+	    $(if $(ADD_BOS),--add_bos,)
 
 # 多 ckpt:make sweep CKPTS="base=/path/a v18=output/phase2_ckpt_v18_tie"
 sweep:

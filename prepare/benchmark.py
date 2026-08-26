@@ -91,9 +91,21 @@ class VLLMPiece(TemplateLM):
         gpu_memory_utilization: float = 0.85,
         batch_size="auto",
         seed: int = 1234,
+        add_bos: bool = False,
         **kwargs,
     ):
         super().__init__()
+        # **默认 False,和 S0/S1/S2 的历史数字同协议。**
+        #
+        # TemplateLM._encode_pair 调 `self.tok_encode(context)`,不传
+        # add_special_tokens,落到 tok_encode 的 None 分支——这个 add_bos
+        # 就是那个分支的默认值。stream 打包的模型(S0/S1/S2)训练时从没见过
+        # BOS,加了反而是分布外;bos_bestfit 打包的模型(S0B 起)训练时
+        # **每行都以 BOS 开头**,不加 BOS 才是分布外——2026-08-26 实测:
+        # S0B 不加 BOS 时 arc_easy acc_norm 从 0.4949(旧协议基线)量级掉到
+        # 0.2656(几乎随机),翻译 5-shot 直接复读崩溃;补上 BOS 后行为正常。
+        # 按训练用的打包方式选,不是随便开。
+        self.add_bos = add_bos
         self._tokenizer = _load_tokenizer(pretrained)
         self._max_length = int(max_model_len)
         self._batch_size = batch_size if batch_size == "auto" else int(batch_size)
@@ -132,6 +144,8 @@ class VLLMPiece(TemplateLM):
     def tok_encode(self, string, add_special_tokens=None, **kwargs):
         if isinstance(string, list):
             return [self.tok_encode(s, add_special_tokens=add_special_tokens) for s in string]
+        if add_special_tokens is None:
+            add_special_tokens = self.add_bos  # TemplateLM._encode_pair 不传这个参数,落这条默认
         ids = self._tokenizer.encode(string, add_special_tokens=False)
         if add_special_tokens:
             ids = [self.prefix_token_id] + ids
@@ -303,6 +317,12 @@ def main():
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max_model_len", type=int, default=4096)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.85)
+    parser.add_argument("--add_bos", action="store_true",
+                        help="默认 False,和 S0/S1/S2 历史数字同协议。"
+                             "bos_bestfit 打包训出来的模型(S0B 起)每行都以 "
+                             "BOS 开头,不加这个跑出来的数字掉到接近随机——"
+                             "见 VLLMPiece.__init__ 里的说明,按训练用的打包"
+                             "方式选,不是随便开。")
     args = parser.parse_args()
 
     # Validate args
@@ -330,6 +350,7 @@ def main():
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         batch_size=args.batch_size,
+        add_bos=args.add_bos,
     )
 
     from lm_eval import simple_evaluate

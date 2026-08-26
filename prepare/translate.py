@@ -103,13 +103,27 @@ def build_prompt(direction: str, exemplars, test_src: str) -> str:
     return "".join(parts)
 
 
-def encode_prompts(tokenizer, prompts):
-    """Returns list[list[int]] of token id lists, no special tokens added."""
+def encode_prompts(tokenizer, prompts, add_bos=False):
+    """Returns list[list[int]] of token id lists.
+
+    **默认不加 BOS**,和 S0/S1/S2 的历史 BLEU/COMET 数字同协议——那几个
+    模型是 `stream` 打包训的,训练时从没见过 BOS,加了反而是分布外。
+    `bos_bestfit` 打包的模型(S0B 起)训练时每行都以 BOS 开头,这个多段
+    拼接、`add_special_tokens=False` 的 few-shot 提示对它是彻底的分布外
+    输入——2026-08-26 实测:S0B 不加 BOS 时 5-shot 翻译直接复读崩溃
+    ("1, 2, \\n, \\n..."),补一个 BOS 就恢复成正常的(虽然还是不对题,但
+    流畅的)续写。按训练用的打包方式选 `add_bos`,不是随便开。
+    """
     out = []
     for p in prompts:
         ids = tokenizer.encode(p, add_special_tokens=False)
         if not isinstance(ids, list):
             ids = ids.tolist() if hasattr(ids, "tolist") else list(ids)
+        if add_bos:
+            bos = getattr(tokenizer, "bos_token_id", None)
+            if bos is None:
+                raise ValueError("--add_bos 但 tokenizer 没有 bos_token_id")
+            ids = [bos] + ids
         out.append(ids)
     return out
 
@@ -144,7 +158,8 @@ def compute_comet(sources, translations, references, comet_model_path, batch_siz
 
 
 def evaluate_vllm(llm, tokenizer, direction, testset, exemplar_set, num_fewshot,
-                  max_samples, max_new_tokens, seed, save_all_samples=False):
+                  max_samples, max_new_tokens, seed, save_all_samples=False,
+                  repetition_penalty=1.0, add_bos=False):
     from vllm import SamplingParams
     sources, references = load_pair(testset, direction)
     if max_samples:
@@ -153,12 +168,16 @@ def evaluate_vllm(llm, tokenizer, direction, testset, exemplar_set, num_fewshot,
     exemplars = pick_exemplars(direction, num_fewshot, seed=seed,
                                 exemplar_set=exemplar_set) if num_fewshot > 0 else []
     prompts = [build_prompt(direction, exemplars, s) for s in sources]
-    prompt_token_ids = encode_prompts(tokenizer, prompts)
+    prompt_token_ids = encode_prompts(tokenizer, prompts, add_bos=add_bos)
 
+    # 默认 rp=1.0(纯贪心),和历史上所有报过的 BLEU/COMET 数字同一协议,可以
+    # 直接比——同样的理由见 stoprate.py 的 rp 说明:跑分协议和部署协议是
+    # 两件事,混着比会把噪声当结论。
     sampling = SamplingParams(
         temperature=0.0,                     # greedy
         max_tokens=max_new_tokens,
         stop_token_ids=[tokenizer.eos_token_id],
+        repetition_penalty=repetition_penalty,
     )
 
     t0 = time.time()
@@ -217,6 +236,13 @@ def main():
     p.add_argument("--compute_comet", action="store_true")
     p.add_argument("--comet_model_path", default=_default_comet())
     p.add_argument("--save_all_samples", action="store_true")
+    p.add_argument("--repetition_penalty", type=float, default=1.0,
+                   help="1.0=纯贪心(默认,和历史数字同协议)。诊断复读崩溃时"
+                        "才临时调,报数要显式标出来,见 stoprate.py 的说明。")
+    p.add_argument("--add_bos", action="store_true",
+                   help="默认 False,和 S0/S1/S2 历史数字同协议。bos_bestfit "
+                        "打包训出来的模型(S0B 起)不加这个跑 5-shot 会复读"
+                        "崩溃,见 encode_prompts() 的说明。")
     p.add_argument("--vllm_dtype", default="bfloat16")
     p.add_argument("--gpu_mem_util", type=float, default=0.85,
                    help="Leave headroom for COMET model. 0.85 = use 85% of GPU.")
@@ -244,7 +270,9 @@ def main():
         print(f"\n=== {d} (testset={args.testset}, {args.num_fewshot}-shot) ===")
         r = evaluate_vllm(llm, tokenizer, d, args.testset, args.exemplar_set,
                           args.num_fewshot, args.max_samples, args.max_new_tokens,
-                          args.seed, save_all_samples=args.save_all_samples)
+                          args.seed, save_all_samples=args.save_all_samples,
+                          repetition_penalty=args.repetition_penalty,
+                          add_bos=args.add_bos)
         print(f"  BLEU = {r['bleu']:.2f}  ({r['n_samples']} samples, {r['time_s']:.0f}s)")
         for s in r["samples"][:3]:
             print(f"    src: {s['src'][:80]}")
