@@ -445,11 +445,14 @@ s0b-service:
 # S0→S1 那套"resume 到旧 max_steps 里"的手法** —— S1 是从 S0 衰减完成
 # 之前的 checkpoint-40000 分叉,当时 LR 还没退到底;S0B 已经完整跑完
 # 55,694 步、衰减到底了,继续用同一个 max_steps 只会让训练在还没怎么退火
-# 就撞上终点。所以给这段退火单独开一个 max_steps:从 checkpoint-55000
-# (keep_ckpt=3 里最新的、有完整 train_state.pt 的一个,离真正的终点
-# 55694 只差 694 步,可以忽略)续跑,**decay_start 恰好落在续跑的第一步**
-# ——学习率会先跳回峰值 0.02,再在新的退火窗口里衰到 0.1×峰值,和 S0→S1
-# 那次"先恒定后退火"的效果等价,只是这次退火段独占了整个新窗口。
+# 就撞上终点。
+#
+# **从 S0B 的最终权重(不是某个中间 checkpoint)重开一段新训练**,优化器
+# 状态清零,不 --resume_from。2026-08-26 做过 A/B 对照:从 checkpoint-55000
+# 带完整动量续 vs 从最终权重清零重开,同样的数据/学习率跑 100 步,loss
+# 逐步几乎完全重合(差不到 0.01)——**担心的"动量清零导致不稳定"没有
+# 被验证出来**,两条路等价,选更"干净"的这条(真正的最终状态,不是差
+# 694 步的近似)。
 #
 # 退火量沿用旧 S1 的窗口大小(5149 步),但因为 seq_len 从 1024 换成 2048、
 # batch/accum 也跟着变了(8×16=128,不是 16×16=256),**token 预算要按
@@ -459,11 +462,11 @@ s0b-service:
 # en 35.3%/zh 35.3%/bi 29.4%,都在容差内(OPUS100_ZHEN 池子只有约 100 万
 # 句对,77.7% 完成度是已知的、设计时就预期的,不影响语言比例对账)。
 # / 128(batch8×accum16)= 5,103 步,**这是实数**,不是占位的 5149 估计值。
-S1B_FROM_STEP ?= 55000
+# 步数从 0 开始计(不是接在 S0B 的 55694 后面),decay_start=0,整段退火
+# 从第一步就在衰减,和 A/B 对照测的那套 schedule 形状一致。
 S1B           ?= $(OUT)/summer05b_s1b
 ANNEAL_MT_S0B ?= $(OUT)/anneal_mt_s0b_2048
 S1B_ANNEAL_STEPS ?= 5103
-S1B_STEPS     ?= $$(( $(S1B_FROM_STEP) + $(S1B_ANNEAL_STEPS) ))
 ANNEAL_MT_S0B_SHARDS = $(shell ls $(ANNEAL_MT_S0B).s*.pt 2>/dev/null | paste -sd,)
 
 .PHONY: encode-anneal-mt-s0b s1b s1b-resume s1b-service
@@ -477,15 +480,14 @@ encode-anneal-mt-s0b:
 s1b:
 	@test -n "$(ANNEAL_MT_S0B_SHARDS)" || { echo "没有 $(ANNEAL_MT_S0B).s*.pt —— 先 make encode-anneal-mt-s0b"; exit 2; }
 	$(PY) $(ROOT)/src/train.py \
-	    --model_path $(INIT_S) --resume_from $(S0B)/checkpoint-$(S1B_FROM_STEP) \
-	    --reset_data_position \
+	    --model_path $(S0B) \
 	    --train_data "$(ANNEAL_MT_S0B_SHARDS)" --mode clm \
 	    --output_dir $(S1B) \
 	    --max_seq_length $(S0B_SEQ) --batch_size $(S0B_BATCH) \
 	    --gradient_accumulation_steps $(S0B_ACCUM) \
 	    --gradient_checkpointing --compile \
 	    --param_dtype float32 --ce_chunk 4096 \
-	    --max_steps $(S1B_STEPS) --warmup_steps 0 \
+	    --max_steps $(S1B_ANNEAL_STEPS) --warmup_steps 0 \
 	    --lr_schedule wsd --lr_decay_steps $(S1B_ANNEAL_STEPS) \
 	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
 	    --max_grad_norm 1.0 --seed 42 \
@@ -495,14 +497,14 @@ s1b:
 # 断了之后接着跑 —— 起点在 S1B 自己的目录里,不是 S0B 的
 s1b-resume:
 	$(PY) $(ROOT)/src/train.py \
-	    --model_path $(INIT_S) --resume_from $(S1B)/checkpoint-$(STEP) \
+	    --model_path $(S0B) --resume_from $(S1B)/checkpoint-$(STEP) \
 	    --train_data "$(ANNEAL_MT_S0B_SHARDS)" --mode clm \
 	    --output_dir $(S1B) \
 	    --max_seq_length $(S0B_SEQ) --batch_size $(S0B_BATCH) \
 	    --gradient_accumulation_steps $(S0B_ACCUM) \
 	    --gradient_checkpointing --compile \
 	    --param_dtype float32 --ce_chunk 4096 \
-	    --max_steps $(S1B_STEPS) --warmup_steps 0 \
+	    --max_steps $(S1B_ANNEAL_STEPS) --warmup_steps 0 \
 	    --lr_schedule wsd --lr_decay_steps $(S1B_ANNEAL_STEPS) \
 	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
 	    --max_grad_norm 1.0 --seed 42 \
