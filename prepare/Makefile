@@ -455,10 +455,14 @@ s0b-service:
 # batch/accum 也跟着变了(8×16=128,不是 16×16=256),**token 预算要按
 # 新配置重算**:5149 × 262,144 = 1,350,032,896 ≈ 1.35B token,和旧 S1 的
 # 1.2B 同一个量级。
+# encode-anneal-mt-s0b 实跑(2026-08-26):653,298 chunk = 1.34B token,
+# en 35.3%/zh 35.3%/bi 29.4%,都在容差内(OPUS100_ZHEN 池子只有约 100 万
+# 句对,77.7% 完成度是已知的、设计时就预期的,不影响语言比例对账)。
+# / 128(batch8×accum16)= 5,103 步,**这是实数**,不是占位的 5149 估计值。
 S1B_FROM_STEP ?= 55000
 S1B           ?= $(OUT)/summer05b_s1b
 ANNEAL_MT_S0B ?= $(OUT)/anneal_mt_s0b_2048
-S1B_ANNEAL_STEPS ?= 5149
+S1B_ANNEAL_STEPS ?= 5103
 S1B_STEPS     ?= $$(( $(S1B_FROM_STEP) + $(S1B_ANNEAL_STEPS) ))
 ANNEAL_MT_S0B_SHARDS = $(shell ls $(ANNEAL_MT_S0B).s*.pt 2>/dev/null | paste -sd,)
 
