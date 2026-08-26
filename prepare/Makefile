@@ -539,6 +539,57 @@ s1b-service:
 	@echo
 	@echo "已装并启动。开机自启还需要一次:  loginctl enable-linger \$$USER"
 
+# ---------------------------------------------------------------- v8:S1B 的单阶段后训练
+#
+# **不是新设计,是重新跑一遍已经验证过的"设计 B"**——`prepare/chat.py` 里
+# `CHAT_TASKS`/`--mix chat` 早就是单阶段后训练(没有 midtrain),打包已经是
+# BOS + best-fit + pad(`encode_turns` 每段以 BOS 开头,装不下就切到轮次边界,
+# 不裁到对话中间),学习率也已经是「预训练峰值 × 0.8」(v7 实测 lr
+# [0.015902, 0.000207],正好是 S1 峰值 muon 0.02 / adam 3e-4 的 0.8 倍,adam
+# 那项还乘了 dmodel_lr_scale 的 0.866)——这套本来就是对齐 nanochat 现在
+# `chat_sft.py`(commit 1ddaad1 之后)的做法,不用重新设计。
+#
+# 这次改两处:
+#   1. seq_length 1024 → 2048(跟 S1B 一致)
+#   2. `chat` → `chat_full`(代码里设计好、从没跑过的版本——把 v7 和 d20
+#      的条数构成逐项对过,发现 SmolTalk 只有 11.5% 远低于 d20 的 54%,
+#      诊断为停止率卡在 67~71% 的根因;chat_full 让 SmolTalk 走全量,
+#      中文按比例跟上保持占比不变)。既然要重做,直接用这个更对齐 d20 的版本,
+#      不用再走 v7 已知有缺口的那版。
+#
+# 步数公式抄 rehearsal.sh:`rows // (batch×accum)`,batch×accum 保持 64
+# 不变(v7 是 batch16×accum4=64;seq 2048 下按显存footprint 减半 batch,
+# batch8×accum8=64,数值不变,只是踩点方式换了)。
+V8_DATA  ?= $(OUT)/chat_full_2048
+V8       ?= $(OUT)/summer05b_v8
+V8_BATCH ?= 8
+V8_ACCUM ?= 8
+
+.PHONY: encode-chat-full-s1b v8
+
+encode-chat-full-s1b:
+	cd $(ROOT) && $(PY) -m prepare.chat --mix chat_full \
+	    --output $(V8_DATA) --seq_length $(S0B_SEQ)
+
+v8:
+	@test -f "$(V8_DATA).pt" || { echo "没有 $(V8_DATA).pt —— 先 make encode-chat-full-s1b"; exit 2; }
+	$(eval V8_STEPS := $(shell $(PY) -c "import torch; print(max(50, torch.load('$(V8_DATA).pt', weights_only=True, mmap=True).shape[0] // ($(V8_BATCH) * $(V8_ACCUM))))"))
+	@echo "步数: $(V8_STEPS)(= 行数 / $(V8_BATCH)*$(V8_ACCUM))"
+	$(PY) $(ROOT)/src/train.py \
+	    --model_path $(S1B) --train_data $(V8_DATA).pt --loss_mask $(V8_DATA).mask.pt --mode clm \
+	    --output_dir $(V8) \
+	    --max_seq_length $(S0B_SEQ) --batch_size $(V8_BATCH) \
+	    --gradient_accumulation_steps $(V8_ACCUM) \
+	    --gradient_checkpointing --compile --param_dtype float32 --ce_chunk 4096 \
+	    --max_steps $(V8_STEPS) --warmup_steps 0 \
+	    --lr_schedule linear --min_lr_ratio 0 \
+	    --muon_lr 0.016 --adam_lr 2.4e-4 \
+	    --muon_momentum 0.95 --muon_momentum_warmup 300 --muon_momentum_start 0.85 \
+	    --adam_beta1 0.8 --adam_beta2 0.95 --adam_weight_decay 0 --dmodel_lr_scale \
+	    --val_rows 512 --eval_steps 150 \
+	    --max_grad_norm 1.0 --seed 42 --num_workers 0 \
+	    --save_steps 300 --logging_steps 25 --keep_ckpt 2
+
 encode-scratch2:
 	$(PY) $(HERE)encode_corpus.py --mix scratch2 \
 	    --tokenizer_model $(PIECE) --cn_dict $(CN_DICT) \
