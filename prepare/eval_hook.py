@@ -60,6 +60,13 @@ def main():
     # 训练(只记一条失败),但曲线上就断了一个点,而且要等 7 小时才知道。
     p.add_argument("--gpu_mem_util", type=float, default=0.6)
     p.add_argument("--python", default=sys.executable)
+    p.add_argument("--add_bos", action="store_true",
+                   help="喂给 translate.py 的 --add_bos。bos_bestfit 打包"
+                        "训出来的模型(S0B 起)训练时每行都以 BOS 开头,中途"
+                        "评测不加这个会复读崩溃——2026-08-26 在 S0B 收尾评测"
+                        "上实测过,那时候是训完之后才发现,这次改成挂钩子的"
+                        "时候就带上,不用等训完再返工。stream 打包的模型"
+                        "(S0/S1/S2)不要传,历史曲线要保持同协议。")
     a = p.parse_args()
 
     tmp_json = os.path.join(a.ckpt, "trans_eval.json")
@@ -75,6 +82,8 @@ def main():
            # 起 vLLM,还得那个 checkpoint 没被 --keep_ckpt 删掉。
            "--save_all_samples",
            "--output_path", tmp_json]
+    if a.add_bos:
+        cmd.append("--add_bos")
 
     t0 = time.time()
     r = subprocess.run(cmd, cwd=ROOT)
