@@ -439,6 +439,100 @@ s0b-service:
 	@echo
 	@echo "已装并启动。开机自启还需要一次:  loginctl enable-linger \$$USER"
 
+# ---------------------------------------------------------------- S1B:S0B 的退火
+#
+# 仿 S0→S1(接平行语料,让模型学会 few-shot 指令有约束力),但**不能照抄
+# S0→S1 那套"resume 到旧 max_steps 里"的手法** —— S1 是从 S0 衰减完成
+# 之前的 checkpoint-40000 分叉,当时 LR 还没退到底;S0B 已经完整跑完
+# 55,694 步、衰减到底了,继续用同一个 max_steps 只会让训练在还没怎么退火
+# 就撞上终点。所以给这段退火单独开一个 max_steps:从 checkpoint-55000
+# (keep_ckpt=3 里最新的、有完整 train_state.pt 的一个,离真正的终点
+# 55694 只差 694 步,可以忽略)续跑,**decay_start 恰好落在续跑的第一步**
+# ——学习率会先跳回峰值 0.02,再在新的退火窗口里衰到 0.1×峰值,和 S0→S1
+# 那次"先恒定后退火"的效果等价,只是这次退火段独占了整个新窗口。
+#
+# 退火量沿用旧 S1 的窗口大小(5149 步),但因为 seq_len 从 1024 换成 2048、
+# batch/accum 也跟着变了(8×16=128,不是 16×16=256),**token 预算要按
+# 新配置重算**:5149 × 262,144 = 1,350,032,896 ≈ 1.35B token,和旧 S1 的
+# 1.2B 同一个量级。
+S1B_FROM_STEP ?= 55000
+S1B           ?= $(OUT)/summer05b_s1b
+ANNEAL_MT_S0B ?= $(OUT)/anneal_mt_s0b_2048
+S1B_ANNEAL_STEPS ?= 5149
+S1B_STEPS     ?= $$(( $(S1B_FROM_STEP) + $(S1B_ANNEAL_STEPS) ))
+ANNEAL_MT_S0B_SHARDS = $(shell ls $(ANNEAL_MT_S0B).s*.pt 2>/dev/null | paste -sd,)
+
+.PHONY: encode-anneal-mt-s0b s1b s1b-resume s1b-service
+
+encode-anneal-mt-s0b:
+	$(PY) $(HERE)encode_corpus.py --mix anneal_mt_s0b \
+	    --tokenizer_model $(PIECE) --cn_dict $(CN_DICT) \
+	    --output $(ANNEAL_MT_S0B) --total_tokens 1350032896 --seq_length $(S0B_SEQ) \
+	    --pack bos_bestfit --shard_output --num_workers 6 --max_tokens_per_shard 150000000
+
+s1b:
+	@test -n "$(ANNEAL_MT_S0B_SHARDS)" || { echo "没有 $(ANNEAL_MT_S0B).s*.pt —— 先 make encode-anneal-mt-s0b"; exit 2; }
+	$(PY) $(ROOT)/src/train.py \
+	    --model_path $(INIT_S) --resume_from $(S0B)/checkpoint-$(S1B_FROM_STEP) \
+	    --reset_data_position \
+	    --train_data "$(ANNEAL_MT_S0B_SHARDS)" --mode clm \
+	    --output_dir $(S1B) \
+	    --max_seq_length $(S0B_SEQ) --batch_size $(S0B_BATCH) \
+	    --gradient_accumulation_steps $(S0B_ACCUM) \
+	    --gradient_checkpointing --compile \
+	    --param_dtype float32 --ce_chunk 4096 \
+	    --max_steps $(S1B_STEPS) --warmup_steps 0 \
+	    --lr_schedule wsd --lr_decay_steps $(S1B_ANNEAL_STEPS) \
+	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
+	    --max_grad_norm 1.0 --seed 42 \
+	    --num_workers $(S0_WORKERS) \
+	    --save_steps 500 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 2000
+
+# 断了之后接着跑 —— 起点在 S1B 自己的目录里,不是 S0B 的
+s1b-resume:
+	$(PY) $(ROOT)/src/train.py \
+	    --model_path $(INIT_S) --resume_from $(S1B)/checkpoint-$(STEP) \
+	    --train_data "$(ANNEAL_MT_S0B_SHARDS)" --mode clm \
+	    --output_dir $(S1B) \
+	    --max_seq_length $(S0B_SEQ) --batch_size $(S0B_BATCH) \
+	    --gradient_accumulation_steps $(S0B_ACCUM) \
+	    --gradient_checkpointing --compile \
+	    --param_dtype float32 --ce_chunk 4096 \
+	    --max_steps $(S1B_STEPS) --warmup_steps 0 \
+	    --lr_schedule wsd --lr_decay_steps $(S1B_ANNEAL_STEPS) \
+	    --muon_lr 0.02 --adam_lr 3e-4 --min_lr_ratio 0.1 \
+	    --max_grad_norm 1.0 --seed 42 \
+	    --num_workers $(S0_WORKERS) \
+	    --save_steps 500 --logging_steps 50 --keep_ckpt 3 --ckpt_milestone 2000
+
+# 同 s0b-service,但只跑退火那 S1B_ANNEAL_STEPS 步。装之前先停掉 summer-s0b,
+# 否则重启后两个服务会一起起来抢 GPU(这时候 s0b 应该已经跑完了,以防万一)。
+S1B_UNIT := $(HOME)/.config/systemd/user/summer-s1b.service
+
+s1b-service:
+	@mkdir -p $(dir $(S1B_UNIT))
+	@printf '%s\n' \
+	  '[Unit]' \
+	  'Description=Summer-0.5B S1B anneal (auto-resume)' \
+	  'StartLimitIntervalSec=3600' \
+	  'StartLimitBurst=5' \
+	  '' \
+	  '[Service]' \
+	  'Type=simple' \
+	  'WorkingDirectory=$(abspath $(ROOT))' \
+	  'Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True' \
+	  'ExecStart=/usr/bin/env bash $(HERE)s1b_autoresume.sh' \
+	  'Restart=on-failure' \
+	  'RestartSec=120' \
+	  '' \
+	  '[Install]' \
+	  'WantedBy=default.target' \
+	  > $(S1B_UNIT)
+	systemctl --user daemon-reload
+	systemctl --user enable --now summer-s1b.service
+	@echo
+	@echo "已装并启动。开机自启还需要一次:  loginctl enable-linger \$$USER"
+
 encode-scratch2:
 	$(PY) $(HERE)encode_corpus.py --mix scratch2 \
 	    --tokenizer_model $(PIECE) --cn_dict $(CN_DICT) \

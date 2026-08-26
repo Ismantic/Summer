@@ -13,6 +13,10 @@
   --mix scratch3 → Summer-0.5B **重做预训练**(2026-08-16):英文单源对齐
                   nanochat(FineWebEdu),中文保持多源但筛过简繁/质量,
                   EN 0.70 / CN 0.30,4 源,14.6B token
+  --mix anneal_mt_s0b → S0B 退火段:结构照抄 anneal_mt,把 Wikipedia_CN
+                  换成 SkyPile(同样的简繁筛查理由)。**--pack 必须传
+                  bos_bestfit**,S0B 从预训练起只见过 BOS 开头的输入,
+                  退火阶段换回 stream 会引入训练时的分布外偏移。
 """
 import argparse
 import glob
@@ -194,6 +198,32 @@ ANNEAL_MT_WEIGHTS = {
     # ---------------- 平行 0.30 ----------------
     "WMT19_ZHEN":     0.26,
     "OPUS100_ZHEN":   0.04,   # 池子只有约 100 万句对,再高就喂不满
+}
+
+# S0B 的退火(仿 S0→S1,给 scratch3 底座接平行语料):结构原样照抄
+# ANNEAL_MT_WEIGHTS(EN 单语 0.35 / CN 单语 0.35 / 平行 0.30),只改一处——
+# `Wikipedia_CN` 换成 `SkyPile`。原因和 SCRATCH3_WEIGHTS 丢弃 Wikipedia_CN
+# 一致:抽样测过它 55.7% 繁体主导,S0B 的下游(COIG/Magpie/Firefly/C3、
+# 以及这个退火阶段本身的评测)全是简体,不该再引入。SkyPile 是 SCRATCH3
+# 已经验过的干净简体源,直接复用。
+#
+# **打包方式必须是 bos_bestfit,不能用 stream。** 旧 anneal_mt_1024 用的是
+# stream(那时候整条线都是 stream),但 S0B 从预训练第一个 token 起就只见过
+# "每行以 BOS 开头"这一种输入分布——退火阶段如果换回 stream(无 BOS 连续流),
+# 相当于又引入一次训练时的分布外偏移,和这次 BOS 评测踩的坑是同一类问题,
+# 只是从"评测脚本没适配"变成"训练数据本身没适配",更不该犯。
+ANNEAL_MT_S0B_WEIGHTS = {
+    # ---------------- EN 0.35 ----------------
+    "FineWebEdu":     0.14,
+    "Cosmopedia":     0.14,
+    "Wikipedia_EN":   0.07,
+    # ---------------- CN 0.35(Wikipedia_CN → SkyPile)----------------
+    "CN_FineWeb_Edu": 0.15,
+    "CCI3-HQ":        0.12,
+    "SkyPile":        0.08,
+    # ---------------- 平行 0.30 ----------------
+    "WMT19_ZHEN":     0.26,
+    "OPUS100_ZHEN":   0.04,
 }
 
 
@@ -631,7 +661,8 @@ def build_shards(weights, total_tokens, n_workers, tmpdir, seq_len, max_line_cha
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--mix", choices=["main", "anneal", "scratch", "scratch2", "scratch3", "anneal_mt"], required=True)
+    p.add_argument("--mix", choices=["main", "anneal", "scratch", "scratch2", "scratch3",
+                                     "anneal_mt", "anneal_mt_s0b"], required=True)
     p.add_argument("--tmpdir", default="",
                    help="worker 中间 .npy 的落地目录。默认与 --output 同目录 ——"
                         "中间文件总量等于产物大小,放 /tmp 会撑爆 tmpfs。")
@@ -665,7 +696,8 @@ def main():
     weights = {"main": MAIN_WEIGHTS, "anneal": ANNEAL_WEIGHTS,
                "scratch": SCRATCH_WEIGHTS, "scratch2": SCRATCH2_WEIGHTS,
                "scratch3": SCRATCH3_WEIGHTS,
-               "anneal_mt": ANNEAL_MT_WEIGHTS}[args.mix]
+               "anneal_mt": ANNEAL_MT_WEIGHTS,
+               "anneal_mt_s0b": ANNEAL_MT_S0B_WEIGHTS}[args.mix]
     print(f"Mix: {args.mix} | sources: {len(weights)} | total weight {sum(weights.values()):.3f}")
     print(f"Budget: {args.total_tokens:,} tokens "
           f"({args.total_tokens // args.seq_length:,} chunks of {args.seq_length})")
