@@ -40,38 +40,51 @@ class Release:
 RELEASES = [
     Release(
         repo_id="Ismantic/Summer-0.5B-S0",
-        local="output/summer05b_s0",
-        stage="S0(从零预训练,纯单语)",
-        note="随机初始化从零训:Qwen3-0.6B-Base 架构 + 自训 81903 piece 词表 = "
-             "524,336,128 参数,单语 12B token(中英 50:50)跑 45,149 步。"
+        local="output/summer05b_s0b",
+        stage="S0(从零预训练,纯单语,2026-08-27 重做)",
+        note="**替换了 2026-08 的原始 S0 发布**——重新对齐 nanochat 的实际训练"
+             "配方:英文单源 FineWebEdu(原来是五源混合)、中文多源但筛过简繁"
+             "(丢弃两个实测 51.8%/55.7% 繁体主导的源)、BOS 对齐 best-fit 打包"
+             "(bos_bestfit,逐行核对过和 nanochat 源码算法一致;原来是无 BOS 的"
+             "连续流)、seq_len 2048(原来是 1024,nanochat 从初始提交起就是"
+             "2048)。14.6B token,英中 70:30,55,694 步。"
              "\n"
-             "**5-shot 翻译基本为零**(WMT22 zh-en BLEU 0.54 / COMET 0.4638,"
-             "en-zh 3.97 / 0.5872):模型完全无视 few-shot 示例,zh→en 时连输出"
-             "语言都不对。语言模型学到了,in-context learning 没有 —— 这不是"
-             "缺陷,是 13B token 这个量级的实话。它的用途是当 S1 的对照,"
-             "以及当后续 midtrain/SFT 的起点。",
+             "**每一次输入都必须以 <bos> 开头**——这个模型训练时从没见过不带"
+             "BOS 的序列,不加会生成退化的重复内容(自己踩过这个坑:评测脚本"
+             "漏加 BOS,似然协议 arc_easy 从 0.54 掉到接近随机,WMT22 5-shot 直接"
+             "复读崩溃)。`example_load.py`/`example_vllm.py` 已经处理。"
+             "\n"
+             "对旧版:字母 MC 四项全面超过(旧版三项低于随机,新版四项都在"
+             "随机线之上);似然协议 arc_easy/arc_challenge 明显更好,"
+             "mmlu/ceval/gsm8k 基本持平。WMT22 5-shot 两版都接近零"
+             "(纯单语,预期内)。没有发现任何指标倒退。",
         sha256={
             "model.safetensors":
-                "d7c081f09d27487588dd88c11e5ef8734a11ca02ae9d7427fbee36b5c3d95a63",
+                "ea4d8ca333b633e43b9afa1138904f0e72a57a5819642ecb816ed6eb751049cc",
             "Summer-Tokenizer.pt":
                 "b9b81cefcaa5d47cd3aa6e653dda0a80f90b7863b3cfff790dfc07c662dda50f",
         },
     ),
     Release(
         repo_id="Ismantic/Summer-0.5B-S1",
-        local="output/summer05b_s1",
-        stage="S1(在 S0 上用中英平行语料退火)",
-        note="从 S0 的 step 40,000 分叉,用含 30% 中英平行语料的 1.2B token 跑完"
-             "退火段(40,000 → 45,149)。与 S0 是受控对照:同起点、同超参、"
-             "同学习率时间表,**只差数据**。"
+        local="output/summer05b_s1b",
+        stage="S1(在 S0 上用中英平行语料退火,2026-08-27 重做)",
+        note="**替换了 2026-08 的原始 S1 发布**,和新版 S0 同一批重做:同样对齐"
+             "nanochat 的 bos_bestfit 打包 + seq_len 2048。从 S0 的**最终权重**"
+             "重新开始(不是从中间 checkpoint 续——A/B 测过带完整优化器状态续"
+             "训 vs 权重清零重开,100 步内 loss 逐步几乎完全重合,两者等价),"
+             "跑 5,103 步、1.34B token,含约 30% 中英平行语料,退火数据同样是"
+             "bos_bestfit 打包(退火阶段如果打包方式和预训练不一致,会在训练"
+             "时引入分布外偏移,是同一类问题的另一种表现)。"
              "\n"
-             "WMT22 5-shot zh-en BLEU 8.99 / COMET 0.6855,en-zh 27.29 / 0.7743"
-             "—— 相对 S0 跳了一个量级(0.54 / 3.97),而且是定性跨越:S0 无视"
-             "示例、输出语言都不对,S1 开始真的在翻译。这 1.2B token 里的"
-             "平行语料是 in-context learning 出现的直接原因。",
+             "**每一次输入都必须以 <bos> 开头**,同新版 S0。"
+             "\n"
+             "WMT22 5-shot zh-en BLEU 8.99 / COMET 0.6883,en-zh 28.36 / 0.7736"
+             "——和旧版 S1(8.99 / 0.6855,27.29 / 0.7743)基本打平,新数据配方"
+             "没有牺牲翻译能力。",
         sha256={
             "model.safetensors":
-                "d465bf052d71d07a236507b1145fdcaa87fa1d4c1bfa6d11f644de35e7dd3a79",
+                "9533953cc0955d35444fd57c50bd4d5a6de018d0a228b0fe81c526295c5bf921",
             "Summer-Tokenizer.pt":
                 "b9b81cefcaa5d47cd3aa6e653dda0a80f90b7863b3cfff790dfc07c662dda50f",
         },
