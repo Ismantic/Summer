@@ -28,6 +28,7 @@
 完整对话历史重新走一遍 `apply_chat_template`,不用自己拼 BOS。
 """
 import argparse
+import datetime
 import sys
 from pathlib import Path
 
@@ -152,6 +153,10 @@ def main() -> int:
                    help="实测甜蜜点,见 prepare/stoprate.py 的说明")
     p.add_argument("--max_new_tokens", type=int, default=600)
     p.add_argument("--gpu_mem_util", type=float, default=0.85)
+    p.add_argument("--log_conversations", default=str(ROOT / "output" / "webchat_conversations.log"),
+                   help="每轮对话(用户输入+模型回复)追加写到这个文件,"
+                        "供本机调试用。默认打开——这是个人体验工具,不是"
+                        "对外服务,不用像面向陌生用户的产品那样默认关闭。")
     args = p.parse_args()
 
     from fastapi import FastAPI
@@ -197,9 +202,18 @@ def main() -> int:
                            use_tqdm=False)
         gen = list(out[0].outputs[0].token_ids)
         reply = tok.decode(gen, skip_special_tokens=True)
+        # **应用户要求打开的对话日志**——默认这个服务不记录任何请求内容
+        # (uvicorn log_level=warning,访问日志是关的)。这里显式记,不是
+        # 顺带打开的:记的是完整用户输入 + 模型回复,仅供本机调试用。
+        last_user = req.messages[-1]["content"] if req.messages else ""
+        with open(args.log_conversations, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.datetime.now().isoformat(timespec='seconds')}] "
+                    f"用户: {last_user}\n")
+            f.write(f"  模型: {reply}\n\n")
         return {"reply": reply}
 
-    print(f"\n打开浏览器访问:  http://<这台机器的局域网 IP>:{args.port}\n")
+    print(f"\n打开浏览器访问:  http://<这台机器的局域网 IP>:{args.port}")
+    print(f"对话记录会追加写到:  {args.log_conversations}\n")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
