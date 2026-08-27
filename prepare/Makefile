@@ -539,18 +539,24 @@ s1b-service:
 	@echo
 	@echo "已装并启动。开机自启还需要一次:  loginctl enable-linger \$$USER"
 
-# ---------------------------------------------------------------- v8:S1B 的单阶段后训练
+# ---------------------------------------------------------------- v8:S0B 的单阶段后训练
+#
+# **起点是 S0B,不是 S1B。** `docs/POSTTRAIN.md` 记得清楚:v7"从 S0 起,设计 B
+# 单阶段"——chat 线和 Interpreter 翻译下游是**两条独立分叉**,都从 S0/S0B 出发,
+# 不是 S0→S1→chat 那样串起来的。S1/S1B 那 30% 中英平行语料是专门为 Interpreter
+# 的翻译能力加的退火,跟"变成一个通用 chat 模型"没关系,混进来对 chat 线只是
+# 噪声,不是助力。第一版写这个目标时把两条分叉当成一条线了,写错了,这里改回来。
 #
 # **不是新设计,是重新跑一遍已经验证过的"设计 B"**——`prepare/chat.py` 里
 # `CHAT_TASKS`/`--mix chat` 早就是单阶段后训练(没有 midtrain),打包已经是
 # BOS + best-fit + pad(`encode_turns` 每段以 BOS 开头,装不下就切到轮次边界,
 # 不裁到对话中间),学习率也已经是「预训练峰值 × 0.8」(v7 实测 lr
-# [0.015902, 0.000207],正好是 S1 峰值 muon 0.02 / adam 3e-4 的 0.8 倍,adam
+# [0.015902, 0.000207],正好是 S0 峰值 muon 0.02 / adam 3e-4 的 0.8 倍,adam
 # 那项还乘了 dmodel_lr_scale 的 0.866)——这套本来就是对齐 nanochat 现在
 # `chat_sft.py`(commit 1ddaad1 之后)的做法,不用重新设计。
 #
 # 这次改两处:
-#   1. seq_length 1024 → 2048(跟 S1B 一致)
+#   1. seq_length 1024 → 2048(跟 S0B 一致)
 #   2. `chat` → `chat_full`(代码里设计好、从没跑过的版本——把 v7 和 d20
 #      的条数构成逐项对过,发现 SmolTalk 只有 11.5% 远低于 d20 的 54%,
 #      诊断为停止率卡在 67~71% 的根因;chat_full 让 SmolTalk 走全量,
@@ -576,7 +582,7 @@ v8:
 	$(eval V8_STEPS := $(shell $(PY) -c "import torch; print(max(50, torch.load('$(V8_DATA).pt', weights_only=True, mmap=True).shape[0] // ($(V8_BATCH) * $(V8_ACCUM))))"))
 	@echo "步数: $(V8_STEPS)(= 行数 / $(V8_BATCH)*$(V8_ACCUM))"
 	$(PY) $(ROOT)/src/train.py \
-	    --model_path $(S1B) --train_data $(V8_DATA).pt --loss_mask $(V8_DATA).mask.pt --mode clm \
+	    --model_path $(S0B) --train_data $(V8_DATA).pt --loss_mask $(V8_DATA).mask.pt --mode clm \
 	    --output_dir $(V8) \
 	    --max_seq_length $(S0B_SEQ) --batch_size $(V8_BATCH) \
 	    --gradient_accumulation_steps $(V8_ACCUM) \
