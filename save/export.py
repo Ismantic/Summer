@@ -213,7 +213,7 @@ model = Qwen3ForCausalLM.from_pretrained(
     dtype=torch.bfloat16)
 
 prompt = "机器翻译的基本任务是"
-ids = tok.encode(prompt, add_special_tokens=False)
+__BOS_LINE__
 print(f"{prompt!r} -> {len(ids)} tokens")
 
 # 贪心续写 40 步。没有 KV cache —— 每步重算前缀,短续写够用。
@@ -268,9 +268,11 @@ prompts = [
     "中文分词的目标是",
 ]
 
+def encode(p):
+    __BOS_LINE_VLLM__
+
 outputs = llm.generate(
-    [TokensPrompt(prompt_token_ids=tok.encode(p, add_special_tokens=False))
-     for p in prompts],
+    [TokensPrompt(prompt_token_ids=encode(p)) for p in prompts],
     SamplingParams(temperature=0.0, max_tokens=64,
                    stop_token_ids=tok.stop_token_ids),
 )
@@ -331,7 +333,7 @@ starts from `N(0, 0.02)`.
 
 ## What to expect
 
-**This is a 13B-token model.** For scale: `Qwen3-0.6B-Base` saw 36T tokens —
+**This is a {tokens}-token model.** For scale: `Qwen3-0.6B-Base` saw 36T tokens —
 about 2,700x more. Treat the numbers below as what that budget buys, not as a
 competitive result.
 
@@ -366,46 +368,107 @@ Please observe their respective licenses.
 
 S0_DESC = """## Stage
 
-**S0** — monolingual only. 12B tokens, Chinese/English 50:50, 45,149 steps.
+**S0** — monolingual only, from-scratch pretraining. 14.6B tokens, English
+70% / Chinese 30%, 55,694 steps.
+
+This is a retrain of the original `Summer-0.5B-S0`, redesigned to align with
+nanochat's actual training recipe:
+
+- **English is a single source** (FineWebEdu, `HuggingFaceFW/fineweb-edu`),
+  matching nanochat's `karpathy/fineweb-edu-100b-shuffle` — not the five-source
+  blend the original release used.
+- **Chinese is still multiple sources**, but screened first: two sources
+  found to be 51.8% / 55.7% Traditional-Chinese-dominant by sampled character
+  frequency (against a downstream instruction mix that is 100% Simplified)
+  were dropped rather than mixed in.
+- **Packing is BOS-aligned best-fit** (`bos_bestfit`): every training row
+  starts with `<bos>` and packs whole documents greedily by best fit, cropping
+  only the one document (if any) that doesn't fit the remainder — the same
+  algorithm as nanochat's `tokenizing_distributed_data_loader_with_state_bos_bestfit`,
+  verified line-by-line against nanochat's source. The original release used a
+  continuous stream with no BOS token at all.
+- **Sequence length is 2048**, matching nanochat (`max_seq_len=2048` since its
+  first commit, used unchanged at every depth from d4 to d26+).
+
+**Every input to this model must start with `<bos>`.** It has never seen a
+sequence that doesn't. `example_load.py` / `example_vllm.py` in this repo do
+this for you — if you tokenize text yourself without prepending `<bos>`, the
+model will produce degenerate repetitive output regardless of prompt.
+
 No parallel or instruction data at any point."""
 
 S1_DESC = """## Stage
 
-**S1** — S0 plus a parallel-data anneal. Branched from S0 at step 40,000 and
-ran the decay window (40,000 -> 45,149) on 1.2B tokens containing **30%
-Chinese-English parallel text**.
+**S1** — S0 plus a parallel-data anneal, same nanochat-aligned recipe as
+`Summer-0.5B-S0` (BOS-aligned best-fit packing, seq_len 2048). Branched from
+S0's **final** checkpoint (optimizer state reset — verified by A/B test to
+behave identically to resuming from a checkpoint with saved optimizer
+momentum) and trained for 5,103 steps on 1.34B tokens containing **~30%
+Chinese-English parallel text**, packed the same BOS-aligned way as S0 (the
+anneal data must match the pretraining packing convention, or the model sees
+an out-of-distribution input shift mid-training).
 
-S0 and S1 are a controlled pair: same starting checkpoint, same
-hyperparameters, same learning-rate schedule. **Only the data differs.**"""
+**Every input must start with `<bos>`**, same as `Summer-0.5B-S0` — see that
+model's card for why."""
 
-S0_RESULTS = """| WMT22 5-shot | BLEU | COMET |
+S0_RESULTS = """### Letter multiple-choice (nanochat's primary format — render the question, model answers a single letter)
+
+| | previous release | this release |
 |---|---|---|
-| zh->en | 0.54 | 0.4638 |
-| en->zh | 3.97 | 0.5872 |
+| ARC-Easy | 0.2563 | 0.2668 |
+| ARC-Challenge | 0.2338 | 0.2654 |
+| MMLU | 0.2306 | 0.2551 |
+| C-Eval | 0.2166 | 0.2527 |
 
-**Few-shot translation is essentially zero, and that is the finding.** The
-model ignores the in-context examples entirely — on zh->en it does not even
-switch output language. Language modelling was learned; in-context learning
-was not. 12B monolingual tokens is not enough for ICL to emerge at 0.5B.
+This release scores above the random baseline (0.25) on all four tasks; the
+previous release was below it on three of four.
 
-Its value is as (a) the control for S1, and (b) a starting point for
-mid-training / SFT."""
+### Likelihood-scoring protocol (lm-evaluation-harness convention)
+
+| | previous release | this release |
+|---|---|---|
+| ARC-Easy (acc_norm) | 0.4949 | 0.5391 |
+| ARC-Challenge (acc_norm) | 0.2671 | 0.3003 |
+| MMLU (acc) | 0.2520 | 0.2465 |
+| C-Eval (acc_norm) | 0.2363 | 0.2348 |
+| GSM8K 8-shot (flexible-extract) | 0.0121 | 0.0167 |
+
+### WMT22 5-shot translation
+
+| | BLEU | COMET |
+|---|---|---|
+| zh->en | 0.29 | 0.4354 |
+| en->zh | 2.78 | 0.5505 |
+
+**Few-shot translation is still essentially zero — expected, this checkpoint
+has never seen parallel text.** The model produces fluent but off-topic
+continuations rather than translations; it does not yet follow the in-context
+examples. See `Summer-0.5B-S1` for the version where in-context translation
+appears. Its value is as (a) a from-scratch bilingual base model in its own
+right, and (b) a starting point for annealing / SFT."""
 
 S1_RESULTS = """| WMT22 5-shot | BLEU | COMET |
 |---|---|---|
-| zh->en | 8.99 | 0.6855 |
-| en->zh | 27.29 | 0.7743 |
+| zh->en | 8.99 | 0.6883 |
+| en->zh | 28.36 | 0.7736 |
 
-Against S0 (0.54 / 3.97) this is more than an order of magnitude, and the
-jump is **qualitative**: S0 ignores the examples and gets the output language
-wrong, S1 actually translates. 1.2B tokens of anneal data — 30% of it
-parallel — is what made in-context learning appear."""
+Against this model's own pre-anneal state (S0, 0.29 / 2.78 BLEU) this is
+qualitative: S0 ignores the in-context examples and produces off-topic
+continuations, S1 actually translates. Against the *previous* `Summer-0.5B-S1`
+release (8.99 / 27.29 BLEU, COMET 0.6855 / 0.7743) this new release performs
+at parity — the nanochat-aligned data recipe did not cost any translation
+quality while improving the base model on every other tracked metric."""
 
+# S0/S1 都需要在推理时手动 prepend BOS —— bos_bestfit 打包训出来的模型,训练
+# 时每一行都以 <bos> 开头,不加它是彻底的分布外输入(2026-08 在自己的评测
+# 脚本上踩过:不加 BOS,似然协议的 arc_easy 从 0.54 掉到接近随机,WMT22 的
+# 5-shot 翻译直接复读崩溃)。ReTok 是旧 tokenizer 换皮 + 连续预训练,从来没有
+# 这个约定,不需要。
 CARDS = {
-    "Summer-0.5B-S0": dict(card=SCRATCH_CARD, tokens="12B",
-                           stage_desc=S0_DESC, results=S0_RESULTS),
-    "Summer-0.5B-S1": dict(card=SCRATCH_CARD, tokens="13B",
-                           stage_desc=S1_DESC, results=S1_RESULTS),
+    "Summer-0.5B-S0": dict(card=SCRATCH_CARD, tokens="14.6B",
+                           stage_desc=S0_DESC, results=S0_RESULTS, needs_bos=True),
+    "Summer-0.5B-S1": dict(card=SCRATCH_CARD, tokens="14.6B + 1.34B anneal",
+                           stage_desc=S1_DESC, results=S1_RESULTS, needs_bos=True),
 }
 
 
@@ -421,6 +484,36 @@ def render_card(repo_id: str) -> str:
     raise SystemExit(
         f"没有 {name} 的模型卡。在 save/export.py 的 CARDS 里加一份 ——"
         f"套用别的模型那份不会报错,但传上去就是错的描述。")
+
+
+def needs_bos(repo_id: str) -> bool:
+    """这个模型是不是 bos_bestfit 打包训出来的 —— 训练时每行都以 <bos> 开头,
+    推理时不加就是分布外输入。2026-08 在自己的评测脚本上踩过:不加 BOS,
+    似然协议的 arc_easy 从 0.54 掉到接近随机,WMT22 5-shot 直接复读崩溃。
+    发布包里的示例脚本必须按这个模型是不是这一类来决定加不加,不能通用一份。
+    """
+    name = repo_id.split("/")[-1]
+    return CARDS.get(name, {}).get("needs_bos", False)
+
+
+def render_example_load(repo_id: str) -> str:
+    bos_line = (
+        "ids = [tok.bos_token_id] + tok.encode(prompt, add_special_tokens=False)  "
+        "# 这个模型训练时每行都以 <bos> 开头,不加是分布外输入——会生成退化的重复内容"
+        if needs_bos(repo_id) else
+        "ids = tok.encode(prompt, add_special_tokens=False)"
+    )
+    return EXAMPLE_LOAD.replace("__BOS_LINE__", bos_line)
+
+
+def render_example_vllm(repo_id: str) -> str:
+    bos_line = (
+        "return [tok.bos_token_id] + tok.encode(p, add_special_tokens=False)  "
+        "# 训练时每行都以 <bos> 开头,不加是分布外输入"
+        if needs_bos(repo_id) else
+        "return tok.encode(p, add_special_tokens=False)"
+    )
+    return EXAMPLE_VLLM.replace("__BOS_LINE_VLLM__", bos_line)
 
 
 def _pick(source, names):
@@ -519,8 +612,8 @@ def main() -> None:
     shutil.copy2(ROOT / "prepare" / "tokenizer.py", out / "tokenizer.py")
     shutil.copy2(ROOT / "src" / "model.py", out / "model.py")
     shutil.copy2(ROOT / "src" / "checkpoint.py", out / "checkpoint.py")
-    write_text(out / "example_load.py", EXAMPLE_LOAD)
-    write_text(out / "example_vllm.py", EXAMPLE_VLLM)
+    write_text(out / "example_load.py", render_example_load(args.repo_id))
+    write_text(out / "example_vllm.py", render_example_vllm(args.repo_id))
     # **不拷 lineage 报告。** 它记的是本机的复现路径(哪个目录、哪个脚本),
     # 里面全是本机绝对路径 —— 那是本机信息,不该跟着模型发出去。复现记录留在
     # 仓库的 docs/reports/v18_tie_lineage.md,模型卡给出仓库链接就够了。
